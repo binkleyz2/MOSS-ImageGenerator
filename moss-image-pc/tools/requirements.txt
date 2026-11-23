@@ -1,0 +1,2 @@
+tokenizers==0.23.3
+pillow==13.0.0

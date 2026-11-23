@@ -1,0 +1,19 @@
+# Downloaded by the installer (about 12 GB) - not stored in git
+moss-image-pc/models/
+moss-image-pc/bin/
+
+# Python environment for the app (rebuild with tools/requirements.txt)
+moss-image-pc/tools/venv/
+__pycache__/
+*.pyc
+
+# Your pictures and per-PC settings
+moss-image-pc/outputs/
+moss-image-pc/tools/gui_settings.json
+
+# Logs, backups and temporary files
+moss-image-install-log.txt
+*.log
+*.before-*
+*.tmp
+*.engine.png
