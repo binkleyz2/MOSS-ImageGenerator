@@ -58,7 +58,7 @@ Same seed, one word changed (*orange cat* to *black cat*):
    powershell -ExecutionPolicy Bypass -File .\installer-moss-image.ps1
    ```
 
-3. **Download `MOSS Image Studio.exe`** from the [Releases page](../../releases/latest). Put it in the `moss-image-pc` folder, or in the repo folder next to it, and double-click it. A desktop shortcut to it is handy.
+3. **Download `MOSS-Image-Studio.exe`** from the [Releases page](../../releases/latest). Put it in the `moss-image-pc` folder, or in the repo folder next to it, and double-click it. A desktop shortcut to it is handy.
 
    The `.exe` isn't code-signed. The first time you run it, Windows SmartScreen may say *"Windows protected your PC"*; click **More info > Run anyway**.
 
