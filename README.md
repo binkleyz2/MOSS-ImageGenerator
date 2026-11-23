@@ -1,4 +1,6 @@
-# MOSS Image on a Windows PC
+# MOSS-ImageGenerator
+
+A local AI image generation tool based on MOSS.
 
 Run the [MOSS-Image](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) text-to-image model locally on Windows with an NVIDIA GPU, using [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp). The repo has three parts:
 
@@ -72,3 +74,7 @@ The installer downloads files from their original sources. Each keeps its own li
 - FLUX.2 VAE
 
 None of these files are stored in this repo.
+
+## License
+
+The code in this repo is licensed under the GNU General Public License v3.0; see [LICENSE](LICENSE). The third-party engine and model files listed above are not covered by it and keep their own licenses.
