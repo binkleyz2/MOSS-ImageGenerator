@@ -1,8 +1,10 @@
 # MOSS-ImageGenerator
 
+> Built on **[MOSS-Image](https://github.com/OpenMOSS/MOSS-Image)** by the OpenMOSS team. This project is an independent Windows app and installer for their model; it isn't affiliated with or endorsed by them. See [Acknowledgements](#acknowledgements).
+
 **Make AI pictures on your own Windows PC: no cloud service, no account, no per-image cost.**
 
-MOSS Image Studio is a desktop app for the open [MOSS-Image](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) text-to-image model. It runs locally on an NVIDIA graphics card through [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp). Type what you want to see, pick a size, and the picture is made on your machine.
+MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) text-to-image model from OpenMOSS. It runs locally on an NVIDIA graphics card through [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp). Type what you want to see, pick a size, and the picture is made on your machine.
 
 ![MOSS Image Studio in dark mode](docs/images/studio-dark.png)
 
@@ -128,18 +130,39 @@ It makes one small picture through the app and writes `selftest-result.json`.
 
 The engine, models, your pictures and settings are not stored in the repo.
 
-## Credits and licenses
+## Acknowledgements
 
-The installer downloads these from their original sources. Each keeps its own license:
+This project is built on **[MOSS-Image](https://github.com/OpenMOSS/MOSS-Image)** by the OpenMOSS team: a 5B-parameter image model with strong text rendering and layout generation. All of the picture-making ability comes from their model. This repo only adds a Windows installer, a launcher and a desktop app around it.
 
-- [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) (MIT)
-- [MOSS-Image](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT), via [Comfy-Org/MOSS-Image](https://huggingface.co/Comfy-Org/MOSS-Image)
-- [Qwen3.5-9B GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF), from unsloth
-- FLUX.2 VAE
+- MOSS-Image code and model weights: [OpenMOSS/MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) on GitHub, [OpenMOSS-Team/MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) on Hugging Face. Licensed under Apache-2.0.
+- The int8 model files the installer downloads come from [Comfy-Org/MOSS-Image](https://huggingface.co/Comfy-Org/MOSS-Image).
 
-The `.exe` bundles Python, Tk, [Pillow](https://python-pillow.org) and Hugging Face [tokenizers](https://github.com/huggingface/tokenizers).
+If you use MOSS-Image in your work, please cite the MOSS-Image technical report:
 
-The code in this repo is licensed under the **GNU General Public License v3.0**; see [LICENSE](LICENSE).
+```bibtex
+@misc{ai2026mossimagetechnicalreport,
+      title={MOSS-Image Technical Report},
+      author={MOSI. AI},
+      year={2026},
+      eprint={2610.23374},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2610.23374},
+}
+```
+
+This project also relies on:
+
+- [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) by leejet and contributors (MIT): the engine that runs the model
+- [Qwen3.5-9B](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) (GGUF build by unsloth): the text encoder
+- FLUX.2 VAE: the image decoder
+- Python, Tk, [Pillow](https://python-pillow.org) and Hugging Face [tokenizers](https://github.com/huggingface/tokenizers), bundled in the `.exe`
+
+None of the third-party model files or engine binaries are stored in this repo. The installer downloads them from their original sources, and each keeps its own license.
+
+## License
+
+The code in this repo is licensed under the **GNU General Public License v3.0**; see [LICENSE](LICENSE). That license covers only the code in this repo, not MOSS-Image or the other projects above.
 
 <details>
 <summary>Light theme</summary>
