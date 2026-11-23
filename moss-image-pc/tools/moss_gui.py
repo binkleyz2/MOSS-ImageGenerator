@@ -11,6 +11,7 @@ import queue
 import random
 import re
 import subprocess
+import sys
 import threading
 import time
 from ctypes import wintypes
@@ -24,11 +25,29 @@ from PIL import Image, ImageTk
 
 import moss_meta as M
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
+__version__ = "1.0.0"
+FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
+RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
+
+
+def find_root():
+    """The moss-image-pc folder made by the installer (it holds bin\\ and models\\)."""
+    if not FROZEN:
+        return Path(__file__).resolve().parent.parent
+    exe_dir = Path(sys.executable).resolve().parent
+    for folder in (exe_dir, exe_dir / "moss-image-pc", exe_dir.parent, exe_dir.parent / "moss-image-pc"):
+        if (folder / "bin" / "sd-cli.exe").exists():
+            return folder
+    return exe_dir
+
+
+ROOT = find_root()
+HERE = ROOT / "tools"
 SD_CLI = ROOT / "bin" / "sd-cli.exe"
 MODELS = ROOT / "models"
 TOKENIZER = MODELS / "tokenizer_qwen3.5.json"
+MODEL_FILES = ["moss_image_sft_int8_convrot.safetensors", "Qwen3.5-9B-Q4_K_M.gguf",
+               "flux2-vae.safetensors", "tokenizer_qwen3.5.json"]
 SETTINGS_FILE = HERE / "gui_settings.json"
 DEFAULT_OUT = ROOT / "outputs"
 
@@ -244,7 +263,7 @@ def finish_files(job, say):
 # ---------------- the window ----------------
 
 class Studio:
-    def __init__(self, root):
+    def __init__(self, root, check=True):
         self.root = root
         self.settings = self.load_settings()
         self.tokenizer = None
@@ -266,7 +285,7 @@ class Studio:
         root.minsize(1100, 850)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         try:
-            root.iconbitmap(default=str(HERE / "moss.ico"))
+            root.iconbitmap(default=str(RESOURCES / "moss.ico"))
         except tk.TclError:
             pass
         self.style = ttk.Style()
@@ -282,6 +301,28 @@ class Studio:
         self.apply_theme()
         threading.Thread(target=self.load_tokenizer, daemon=True).start()
         self.root.after(100, self.poll_events)
+        if check:
+            self.root.after(400, self.check_install)
+
+    # ---------------- install check ----------------
+    def missing_files(self):
+        need = [SD_CLI] + [MODELS / name for name in MODEL_FILES]
+        return [p for p in need if not p.exists()]
+
+    def check_install(self):
+        """Warn if the engine or models are missing. Returns True when everything is there."""
+        missing = self.missing_files()
+        if missing:
+            names = "\n".join(f"  {p.relative_to(ROOT)}" for p in missing[:6])
+            messagebox.showwarning(
+                "MOSS Image Studio",
+                "The MOSS engine or model files were not found, so pictures can't be made yet.\n\n"
+                f"Looked in: {ROOT}\nMissing:\n{names}\n\n"
+                "Run installer-moss-image.ps1 first. Then put MOSS Image Studio.exe in the "
+                "moss-image-pc folder it creates (next to the bin and models folders), "
+                "or in the folder that holds moss-image-pc.\n\n"
+                "You can still open pictures and edit their details.")
+        return not missing
 
     # ---------------- settings ----------------
     def load_settings(self):
@@ -298,6 +339,7 @@ class Studio:
                  upscale=self.upscale.get(), split=self.split.get(), theme=self.theme.get(),
                  geometry=self.root.geometry())
         try:
+            SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
             SETTINGS_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -817,6 +859,8 @@ class Studio:
     def start(self):
         if self.job:
             return
+        if not self.check_install():
+            return
         prompt = tidy_prompt(self.prompt.get("1.0", "end"))
         if not prompt:
             messagebox.showinfo("MOSS Image Studio", "Type what you want to see first.")
@@ -1154,13 +1198,61 @@ class Studio:
         self.root.destroy()
 
 
+def selftest(root, out_dir):
+    """MOSS Image Studio.exe --selftest <folder>: make one small picture through the normal window,
+    write selftest-result.json into the folder, then close. Leaves the normal settings untouched."""
+    global SETTINGS_FILE
+    out = Path(out_dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE = out / "selftest-settings.json"
+    result = {"version": __version__, "frozen": FROZEN, "root": str(ROOT), "ok": False}
+    app = Studio(root, check=False)
+    app.out_dir.set(str(out))
+    app.prompt.insert("1.0", 'Self-test: a red apple on a wooden table, "OK" written in chalk')
+    app.aspect.set(CUSTOM)
+    app.width.set(256)
+    app.height.set(256)
+    app.on_manual_size()
+    app.fmt.set("png")
+    app.seed_mode.set("number")
+    app.seed_value.set("42")
+
+    def finish(status):
+        result["status"] = status
+        if app.current:
+            meta = M.read(app.current)
+            result.update(file=app.current.name, title=meta["title"], comment=meta["comment"],
+                          settings=meta["settings"], ok=meta["comment"].startswith("Self-test"))
+        (out / "selftest-result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        root.destroy()
+
+    def wait():
+        if app.job is None and app.go_btn.instate(["!disabled"]):
+            finish(app.status.cget("text"))
+        else:
+            root.after(500, wait)
+
+    def go():
+        result["engine_found"] = app.missing_files() == []
+        if not result["engine_found"]:
+            finish("engine or models missing")
+            return
+        app.start()
+        root.after(1000, wait)
+
+    root.after(1500, go)
+
+
 def main():
     try:  # sharp text on high-DPI screens
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
     root = tk.Tk()
-    Studio(root)
+    if len(sys.argv) == 3 and sys.argv[1] == "--selftest":
+        selftest(root, sys.argv[2])
+    else:
+        Studio(root)
     root.mainloop()
 
 

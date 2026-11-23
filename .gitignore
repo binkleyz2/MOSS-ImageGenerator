@@ -7,6 +7,11 @@ moss-image-pc/tools/venv/
 __pycache__/
 *.pyc
 
+# Build output (the .exe is published on the Releases page instead)
+dist/
+packaging/build/
+packaging/.venv-build/
+
 # Your pictures and per-PC settings
 moss-image-pc/outputs/
 moss-image-pc/tools/gui_settings.json
