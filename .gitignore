@@ -22,3 +22,7 @@ moss-image-install-log.txt
 *.before-*
 *.tmp
 *.engine.png
+
+# Engine backups and update staging
+moss-image-pc/bin-old-*/
+moss-image-pc/engine-update/

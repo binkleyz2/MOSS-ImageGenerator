@@ -1,5 +1,5 @@
 # install-moss-image.ps1
-# Installs MOSS-Image (stable-diffusion.cpp master-1031-c6dfa9d) into the moss-image-pc folder next to this script,
+# Installs MOSS-Image (stable-diffusion.cpp master-1127-79dc7ca) into the moss-image-pc folder next to this script,
 # runs a test image, and creates "MOSS Image.bat" on the Desktop.
 # Safe to re-run: finished downloads are skipped, partial ones resume.
 
@@ -11,7 +11,9 @@ $Bin     = Join-Path $Root 'bin'
 $Models  = Join-Path $Root 'models'
 $Outputs = Join-Path $Root 'outputs'
 $LogFile = Join-Path $env:TEMP 'moss-image-install-log.txt'
-$Release = 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-1031-c6dfa9d'
+$SdTag   = 'master-1127-79dc7ca'   # stable-diffusion.cpp release; bump both lines together
+$SdShort = '79dc7ca'
+$Release = "https://github.com/leejet/stable-diffusion.cpp/releases/download/$SdTag"
 $GB = 1GB
 
 try { Stop-Transcript | Out-Null } catch {}
@@ -130,17 +132,18 @@ function Get-File($url, $dest, $approxBytes, $label) {
 }
 
 # ---------------------------------------------------------------- Step 3: stable-diffusion.cpp
-Step '3. Installing stable-diffusion.cpp master-1031-c6dfa9d'
+Step "3. Installing stable-diffusion.cpp $SdTag"
 $sdcli = Join-Path $Bin 'sd-cli.exe'
 $builtFor = Join-Path $Bin 'build.txt'
 $haveBuild = ''; if (Test-Path $builtFor) { $haveBuild = (Get-Content $builtFor -Raw).Trim() }
-if ((Test-Path $sdcli) -and $haveBuild -eq $gpuKind) {
+$wantBuild = "$gpuKind $SdTag"
+if ((Test-Path $sdcli) -and $haveBuild -eq $wantBuild) {
     Say 'sd-cli.exe is already installed; skipping.' Green
 } else {
     $zips = switch ($gpuKind) {
-        'nvidia' { @('sd-master-c6dfa9d-bin-win-cuda12-x64.zip', 'cudart-sd-bin-win-cu12-x64.zip') }
-        'vulkan' { @('sd-master-c6dfa9d-bin-win-vulkan-x64.zip') }
-        default  { @('sd-master-c6dfa9d-bin-win-cpu-x64.zip') }
+        'nvidia' { @("sd-master-$SdShort-bin-win-cuda12-x64.zip", 'cudart-sd-bin-win-cu12-x64.zip') }
+        'vulkan' { @("sd-master-$SdShort-bin-win-vulkan-x64.zip") }
+        default  { @("sd-master-$SdShort-bin-win-cpu-x64.zip") }
     }
     $dl = Join-Path $Root '_zips'
     New-Item -ItemType Directory -Force -Path $dl | Out-Null
@@ -156,7 +159,7 @@ if ((Test-Path $sdcli) -and $haveBuild -eq $gpuKind) {
         Get-ChildItem $found.DirectoryName -Force | Move-Item -Destination $Bin -Force
     }
     Get-ChildItem $Bin -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
-    Set-Content -Path $builtFor -Value $gpuKind -Encoding ASCII
+    Set-Content -Path $builtFor -Value $wantBuild -Encoding ASCII
     Remove-Item $dl -Recurse -Force -ErrorAction SilentlyContinue
     Say "sd-cli.exe is in $Bin" Green
 }
@@ -269,7 +272,7 @@ Say "Created $batPath" Green
 Remove-Item (Join-Path $Root 'sd-run-out.txt'), (Join-Path $Root 'sd-run-err.txt') -ErrorAction SilentlyContinue
 $used = (Get-ChildItem $Root -Recurse -File | Measure-Object Length -Sum).Sum
 Step 'Done'
-Say ("Installed:   stable-diffusion.cpp master-1031-c6dfa9d ({0} build) + MOSS-Image ({1})" -f $gpuKind, $model) White
+Say ("Installed:   stable-diffusion.cpp {2} ({0} build) + MOSS-Image ({1})" -f $gpuKind, $model, $SdTag) White
 Say ("Location:    {0}" -f $Root) White
 Say ("Disk used:   {0}" -f (Fmt $used)) White
 Say ("One image:   about {0} (1360x768, 50 steps)" -f $timeText) White

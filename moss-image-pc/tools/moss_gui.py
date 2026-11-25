@@ -25,7 +25,7 @@ from PIL import Image, ImageTk
 
 import moss_meta as M
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -45,18 +45,59 @@ ROOT = find_root()
 HERE = ROOT / "tools"
 SD_CLI = ROOT / "bin" / "sd-cli.exe"
 MODELS = ROOT / "models"
-TOKENIZER = MODELS / "tokenizer_qwen3.5.json"
-MODEL_FILES = ["moss_image_sft_int8_convrot.safetensors", "Qwen3.5-9B-Q4_K_M.gguf",
-               "flux2-vae.safetensors", "tokenizer_qwen3.5.json"]
+TOKENIZER = MODELS / "tokenizer_qwen3.5.json"   # used for token counts (exact for MOSS, close for the others)
 SETTINGS_FILE = HERE / "gui_settings.json"
 DEFAULT_OUT = ROOT / "outputs"
 
-STEPS, CFG = 50, 3.0
-MAX_PIXELS = 3440 * 1440          # largest picture the model makes here (about 5 MP)
+MAX_PIXELS = 3440 * 1440          # largest picture made here (about 5 MP)
 MAX_SIDE = 3440                   # longest side for normal pictures
 MAX_SPAN_SIDE = 6144              # longest side when drawing for several screens side by side
 TILE_ABOVE = 2_000_000            # bigger pictures are decoded in tiles to save video memory
-SOFTWARE = "MOSS-Image SFT (stable-diffusion.cpp)"
+SOFTWARE = f"MOSS Image Studio {__version__} (stable-diffusion.cpp)"
+
+# Models this app can run. "files" are engine options -> paths under models\.
+# "edit" adds what the model needs to change an existing picture (passed with -r).
+# step_secs: seconds per step for a ~1 MP picture on an RTX 4070 Ti SUPER (for time estimates).
+PROFILES = {
+    "moss": dict(
+        name="MOSS-Image SFT", prefix="moss", license="Apache-2.0",
+        files={"--diffusion-model": "moss_image_sft_int8_convrot.safetensors",
+               "--llm": "Qwen3.5-9B-Q4_K_M.gguf", "--vae": "flux2-vae.safetensors",
+               "--tokenizer": "tokenizer_qwen3.5.json"},
+        steps=50, cfg=3.0, sampler=None, align=16, step_secs=0.58, exact_tokens=True,
+        note="Detailed scenes and readable text. 50 steps.",
+        edit=dict(files={"--llm_vision": "Qwen3.5-9B-mmproj-BF16.gguf",
+                         "--lora-model-dir": "loras"},
+                  need=["loras/armV5-moss-edit-lora.safetensors"],
+                  prompt_suffix="<lora:armV5-moss-edit-lora:1.0>", steps=50, cfg=3.0, extra_secs=35)),
+    "flux2-klein-4b": dict(
+        name="FLUX.2 Klein 4B", prefix="flux2klein", license="Apache-2.0",
+        files={"--diffusion-model": "flux2-klein-4b/flux-2-klein-4b-Q8_0.gguf",
+               "--llm": "flux2-klein-4b/Qwen3-4B-Q8_0.gguf", "--vae": "flux2-vae.safetensors"},
+        steps=4, cfg=1.0, sampler="euler", align=16, step_secs=0.5, exact_tokens=False,
+        note="Very fast: 4 steps. Photos and general pictures.",
+        edit=dict(files={}, need=[], prompt_suffix="", steps=4, cfg=1.0, extra_secs=2)),
+    "qwen-image-2.1": dict(
+        name="Qwen Image 2.1", prefix="qwenimage", license="Qwen Research (non-commercial)",
+        files={"--diffusion-model": "qwen-image-2.1/qwen_image_2.1_int8_convrot.safetensors",
+               "--vae": "qwen-image-2.1/qwen_image_2.1_vae_bf16.safetensors",
+               "--llm": "qwen-image-2.1/Qwen3VL-8B-Instruct-Q4_K_M.gguf"},
+        steps=40, cfg=6.0, sampler="euler", align=32, step_secs=0.75, exact_tokens=False,
+        note="Strong at text in pictures and complex layouts. 40 steps. New pictures only.",
+        # Editing works in the engine but needs more memory than a 16 GB card + 64 GB PC gives it
+        # here (13+ minutes and poor results), so it is turned off.
+        edit=None),
+}
+DEFAULT_PROFILE = "moss"
+
+
+def profile_files(profile, edit=False):
+    """Paths of every file a model needs (for new pictures, or for editing too)."""
+    paths = [MODELS / p for opt, p in profile["files"].items()]
+    if edit and profile["edit"]:
+        paths += [MODELS / p for opt, p in profile["edit"]["files"].items() if opt != "--lora-model-dir"]
+        paths += [MODELS / p for p in profile["edit"]["need"]]
+    return paths
 
 TIERS = ["Standard (~1 MP)", "Large (~2 MP)", "Extra large (~3.7 MP)", "Maximum (~5 MP)"]
 TIER_PIXELS = [1_040_000, 2_070_000, 3_690_000, MAX_PIXELS]
@@ -86,9 +127,13 @@ DARK = dict(bg="#1f2023", field="#2b2d31", fg="#e8e8e8", hint="#a0a4ab", error="
 
 # ---------------- helpers ----------------
 
-def estimate(w, h):
+def estimate(w, h, profile=None, editing=False):
     """Rough time on this PC (RTX 4070 Ti SUPER), from earlier runs."""
-    secs = 8 + 55 * ((w * h / 1e6) / 1.04) ** 1.25
+    profile = profile or PROFILES[DEFAULT_PROFILE]
+    steps = profile["edit"]["steps"] if editing and profile["edit"] else profile["steps"]
+    secs = 10 + steps * profile["step_secs"] * ((w * h / 1e6) / 1.04) ** 1.25
+    if editing and profile["edit"]:
+        secs += profile["edit"].get("extra_secs", 0)
     if secs < 50:
         return "under a minute"
     mins = secs / 60
@@ -106,8 +151,8 @@ def auto_title(prompt, words=8):
     return title + ("..." if len(parts) > words else "")
 
 
-def fit_size(full_w, full_h, target_pixels, max_side=MAX_SPAN_SIDE):
-    """Largest drawing size with the shape of full_w x full_h, multiples of 16, within the limits."""
+def fit_size(full_w, full_h, target_pixels, max_side=MAX_SPAN_SIDE, align=16):
+    """Largest drawing size with the shape of full_w x full_h, multiples of align, within the limits."""
     target = min(target_pixels, MAX_PIXELS, full_w * full_h)
     r = full_w / full_h
     h = (target / r) ** 0.5
@@ -116,15 +161,15 @@ def fit_size(full_w, full_h, target_pixels, max_side=MAX_SPAN_SIDE):
         w, h = max_side, max_side / r
     if h > max_side:
         h, w = max_side, max_side * r
-    gw = max(256, int(w // 16) * 16)
-    gh = max(256, int(round(gw / r / 16)) * 16)
+    gw = max(256, int(w // align) * align)
+    gh = max(256, int(round(gw / r / align)) * align)
     while gw * gh > min(MAX_PIXELS, target * 1.02) and (gw > 256 or gh > 256):
         if gh > 256 and gh * r >= gw:
-            gh -= 16
+            gh -= align
         elif gw > 256:
-            gw -= 16
+            gw -= align
         else:
-            gh -= 16
+            gh -= align
     return gw, gh
 
 
@@ -214,13 +259,17 @@ def windows_uses_dark():
 
 def write_txt(final, job):
     tokens = f"{job['tokens']:,}" if job["tokens"] is not None else "unknown"
-    lines = ["Prompt:", job["prompt"], "",
-             f"Tokens: {tokens} (Qwen 3.5 tokenizer, prompt text only)",
+    how = "exact" if job["profile"]["exact_tokens"] else "approximate"
+    lines = ["Edit instruction:" if job["edit_src"] else "Prompt:", job["prompt"], "",
+             f"Tokens: {tokens} (Qwen 3.5 tokenizer, prompt text only; {how} for this model)",
              f"Words: {len(job['prompt'].split()):,}", f"Characters: {len(job['prompt']):,}", "",
-             f"Image: {final.name}", f"Size: {job['w']} x {job['h']}"]
+             f"Image: {final.name}", f"Model: {job['profile']['name']}", f"Size: {job['w']} x {job['h']}"]
+    if job["edit_src"]:
+        lines.append(f"Edited from: {job['edit_src']}")
     if job.get("screen"):
         lines.append(f"Made for: {job['shape']}" + (" (scaled up)" if job["upscale"] else ""))
-    lines += [f"Seed: {job['seed']}", f"Steps: {STEPS}", f"CFG scale: {CFG}", f"Made: {job['when']:%Y-%m-%d %H:%M:%S}"]
+    lines += [f"Seed: {job['seed']}", f"Steps: {job['steps']}", f"CFG scale: {job['cfg']}",
+              f"Made: {job['when']:%Y-%m-%d %H:%M:%S}"]
     try:
         final.with_suffix(".txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     except OSError:
@@ -279,10 +328,15 @@ class Studio:
         self.colors = LIGHT
         self.texts = []
         self.combos = []
+        key = self.settings.get("model", DEFAULT_PROFILE)
+        self.model_key = key if key in PROFILES else DEFAULT_PROFILE
+        self.mode = tk.StringVar(value="new")
+        self.edit_src = None           # picture to edit (Edit mode)
+        self.spins = []
 
         root.title("MOSS Image Studio")
         root.geometry(self.settings.get("geometry", "1360x900"))
-        root.minsize(1100, 850)
+        root.minsize(1100, 900)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         try:
             root.iconbitmap(default=str(RESOURCES / "moss.ico"))
@@ -305,24 +359,38 @@ class Studio:
             self.root.after(400, self.check_install)
 
     # ---------------- install check ----------------
-    def missing_files(self):
-        need = [SD_CLI] + [MODELS / name for name in MODEL_FILES]
-        return [p for p in need if not p.exists()]
+    @property
+    def profile(self):
+        return PROFILES[self.model_key]
 
-    def check_install(self):
-        """Warn if the engine or models are missing. Returns True when everything is there."""
-        missing = self.missing_files()
-        if missing:
-            names = "\n".join(f"  {p.relative_to(ROOT)}" for p in missing[:6])
-            messagebox.showwarning(
-                "MOSS Image Studio",
-                "The MOSS engine or model files were not found, so pictures can't be made yet.\n\n"
-                f"Looked in: {ROOT}\nMissing:\n{names}\n\n"
-                "Run installer-moss-image.ps1 first. Then put MOSS Image Studio.exe in the "
-                "moss-image-pc folder it creates (next to the bin and models folders), "
-                "or in the folder that holds moss-image-pc.\n\n"
-                "You can still open pictures and edit their details.")
-        return not missing
+    def missing_files(self, key=None, edit=False):
+        profile = PROFILES[key or self.model_key]
+        return [p for p in [SD_CLI] + profile_files(profile, edit) if not p.exists()]
+
+    def check_install(self, edit=False):
+        """Warn if the engine or the chosen model's files are missing. Returns True when all are there."""
+        missing = self.missing_files(edit=edit)
+        if not missing:
+            return True
+        names = "\n".join(f"  {p.relative_to(ROOT)}" for p in missing[:8])
+        if not SD_CLI.exists():
+            text = ("The image engine was not found, so pictures can't be made yet.\n\n"
+                    f"Looked in: {ROOT}\nMissing:\n{names}\n\n"
+                    "Run installer-moss-image.ps1 first. Then put MOSS Image Studio.exe in the "
+                    "moss-image-pc folder it creates (next to the bin and models folders), "
+                    "or in the folder that holds moss-image-pc.")
+        else:
+            what = "editing pictures with" if edit else "using"
+            text = (f"Some files needed for {what} {self.profile['name']} aren't downloaded yet.\n\n"
+                    f"Missing:\n{names}\n\n"
+                    "Run download-models.ps1 (next to the installer) to get them, "
+                    "or choose another model.")
+        messagebox.showwarning("MOSS Image Studio", text + "\n\nYou can still open pictures and edit their details.")
+        return False
+
+    def model_label(self, key):
+        installed = not self.missing_files(key)
+        return PROFILES[key]["name"] + ("" if installed else "  (not downloaded)")
 
     # ---------------- settings ----------------
     def load_settings(self):
@@ -337,7 +405,7 @@ class Studio:
                  authors=self.authors.get(), copyright=self.copyright.get(), tags=self.tags.get(),
                  aspect=self.aspect.get(), tier=self.tier.get(), width=self.width.get(), height=self.height.get(),
                  upscale=self.upscale.get(), split=self.split.get(), theme=self.theme.get(),
-                 geometry=self.root.geometry())
+                 model=self.model_key, geometry=self.root.geometry())
         try:
             SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
             SETTINGS_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
@@ -359,19 +427,46 @@ class Studio:
 
         box = ttk.LabelFrame(left, text=" What do you want to see? ", padding=8)
         box.grid(row=0, column=0, sticky="nsew")
+        self.prompt_box = box
+        # Model and mode
+        top = ttk.Frame(box)
+        top.grid(row=0, column=0, columnspan=4, sticky="we", pady=(0, 6))
+        ttk.Label(top, text="Model").pack(side="left")
+        self.model_var = tk.StringVar()
+        self.model_box = ttk.Combobox(top, textvariable=self.model_var, state="readonly", width=30)
+        self.model_box.pack(side="left", padx=(6, 12))
+        self.model_box.bind("<<ComboboxSelected>>", lambda e: self.on_model_change())
+        self.combos.append(self.model_box)
+        ttk.Radiobutton(top, text="New picture", value="new", variable=self.mode,
+                        command=self.on_mode_change).pack(side="left")
+        ttk.Radiobutton(top, text="Edit a picture", value="edit", variable=self.mode,
+                        command=self.on_mode_change).pack(side="left", padx=(8, 0))
+        self.model_note = ttk.Label(box, text="", style="Hint.TLabel", wraplength=440)
+        self.model_note.grid(row=1, column=0, columnspan=4, sticky="w")
+        # Picture to edit (Edit mode only)
+        self.edit_row = ttk.Frame(box)
+        self.edit_row.grid(row=2, column=0, columnspan=4, sticky="we", pady=(6, 0))
+        ttk.Label(self.edit_row, text="Picture to edit:").pack(side="left")
+        self.edit_label = ttk.Label(self.edit_row, text="none chosen", style="Hint.TLabel", width=26)
+        self.edit_label.pack(side="left", padx=6)
+        ttk.Button(self.edit_row, text="Choose...", command=self.choose_edit_src).pack(side="right")
+        ttk.Button(self.edit_row, text="Use the picture shown", command=self.use_shown_as_src
+                   ).pack(side="right", padx=4)
+        self.edit_row.grid_remove()
+
         self.prompt = self.make_text(box, height=8, width=58, wrap="word", font=("Segoe UI", 10), undo=True)
         sb = ttk.Scrollbar(box, command=self.prompt.yview)
         self.prompt.configure(yscrollcommand=sb.set)
-        self.prompt.grid(row=0, column=0, columnspan=3, sticky="nsew")
-        sb.grid(row=0, column=3, sticky="ns")
-        box.rowconfigure(0, weight=1)
+        self.prompt.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        sb.grid(row=3, column=3, sticky="ns", pady=(6, 0))
+        box.rowconfigure(3, weight=1)
         box.columnconfigure(0, weight=1)
         self.token_label = ttk.Label(box, text="Tokens: loading the tokenizer...", style="Hint.TLabel")
-        self.token_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.token_label.grid(row=4, column=0, sticky="w", pady=(6, 0))
         ttk.Button(box, text="Clear", command=lambda: (self.prompt.delete("1.0", "end"), self.update_tokens())
-                   ).grid(row=1, column=1, sticky="e", pady=(6, 0), padx=4)
+                   ).grid(row=4, column=1, sticky="e", pady=(6, 0), padx=4)
         ttk.Button(box, text="Use an earlier picture...", command=self.reuse_from_file
-                   ).grid(row=1, column=2, columnspan=2, sticky="e", pady=(6, 0))
+                   ).grid(row=4, column=2, columnspan=2, sticky="e", pady=(6, 0))
         self.prompt.bind("<<Modified>>", self.on_prompt_change)
 
         # Size
@@ -399,6 +494,7 @@ class Studio:
             sp = ttk.Spinbox(row, from_=256, to=MAX_SPAN_SIDE, increment=16, textvariable=var, width=6,
                              command=self.on_manual_size)
             sp.pack(side="left", padx=(12 if not i else 0, 0))
+            self.spins.append(sp)
             sp.bind("<KeyRelease>", lambda e: self.on_manual_size())
         self.size_label = ttk.Label(size, text="", style="Hint.TLabel", wraplength=430)
         self.size_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
@@ -645,8 +741,102 @@ class Studio:
         if aspect == CUSTOM:
             self.width.set(s.get("width", 1360))
             self.height.set(s.get("height", 768))
+        self.refresh_model_list()
         self.apply_preset()
         self.on_seed_mode()
+
+    # ---------------- model and mode ----------------
+    def refresh_model_list(self):
+        self.model_box.configure(values=[self.model_label(k) for k in PROFILES])
+        self.model_var.set(self.model_label(self.model_key))
+        p = self.profile
+        self.model_note.configure(text=f"{p['note']}  License: {p['license']}.")
+        for sp in self.spins:
+            sp.configure(increment=p["align"])
+
+    def on_model_change(self):
+        labels = [self.model_label(k) for k in PROFILES]
+        chosen = self.model_box.current()
+        if chosen < 0:
+            return
+        self.model_key = list(PROFILES)[chosen]
+        self.refresh_model_list()
+        if self.mode.get() == "edit" and not self.can_edit():
+            self.mode.set("new")
+            self.on_mode_change()
+        if self.mode.get() == "edit" and self.edit_src:
+            self.set_edit_src(self.edit_src)
+        else:
+            self.apply_preset()
+        self.update_tokens()
+        self.save_settings()
+        if labels[chosen].endswith("(not downloaded)"):
+            self.check_install()
+
+    def can_edit(self, warn=True):
+        if self.profile["edit"]:
+            return True
+        if warn:
+            others = ", ".join(p["name"] for p in PROFILES.values() if p["edit"])
+            messagebox.showinfo("Edit a picture", f"{self.profile['name']} can't edit pictures in this app yet: "
+                                f"on this setup it runs out of memory. Use {others} for editing.")
+        return False
+
+    def on_mode_change(self):
+        if self.mode.get() == "edit" and not self.can_edit():
+            self.mode.set("new")
+        editing = self.mode.get() == "edit"
+        self.prompt_box.configure(text=" What should change? " if editing else " What do you want to see? ")
+        self.go_btn.configure(text="Edit picture" if editing else "Make picture")
+        if editing:
+            self.edit_row.grid()
+            for w in (self.aspect_box, self.tier_box, *self.spins):
+                w.state(["disabled"])
+            self.screen_box.grid_remove()
+            if not self.edit_src and self.current:
+                self.set_edit_src(self.current)
+            self.update_size_label()
+        else:
+            self.edit_row.grid_remove()
+            self.aspect_box.state(["!disabled", "readonly"])
+            for w in self.spins:
+                w.state(["!disabled"])
+            self.apply_preset()
+
+    def set_edit_src(self, path):
+        """Use path as the picture to edit; the new picture keeps its size (within the limits)."""
+        try:
+            with Image.open(path) as im:
+                sw, sh = im.size
+        except Exception as e:
+            messagebox.showerror("Edit a picture", f"Can't open that picture:\n{e}")
+            return
+        self.edit_src = Path(path)
+        name = self.edit_src.name
+        self.edit_label.configure(text=name if len(name) <= 34 else name[:31] + "...")
+        align = self.profile["align"]
+        if sw * sh <= MAX_PIXELS and sw % align == 0 and sh % align == 0 and max(sw, sh) <= MAX_SIDE:
+            w, h = sw, sh
+        else:
+            w, h = fit_size(sw, sh, min(sw * sh, MAX_PIXELS), max_side=MAX_SIDE, align=align)
+        self.width.set(w)
+        self.height.set(h)
+        self.update_size_label()
+
+    def choose_edit_src(self):
+        path = filedialog.askopenfilename(
+            initialdir=self.out_dir.get() or str(DEFAULT_OUT), title="Choose the picture to edit",
+            filetypes=[("Pictures", "*.png *.jpg *.jpeg *.webp"), ("All files", "*.*")])
+        if path:
+            self.set_edit_src(path)
+            if self.edit_src:
+                self.show_picture(self.edit_src)
+
+    def use_shown_as_src(self):
+        if self.current:
+            self.set_edit_src(self.current)
+        else:
+            messagebox.showinfo("Edit a picture", "No picture is shown yet. Use Choose... to pick one.")
 
     # ---------------- prompt and tokens ----------------
     def load_tokenizer(self):
@@ -678,7 +868,8 @@ class Studio:
         elif n is None:
             msg = "Tokens: could not load the tokenizer"
         else:
-            msg = f"Tokens: {n:,}   Words: {len(text.split()):,}   Characters: {len(text):,}"
+            approx = "" if self.profile["exact_tokens"] else "about "
+            msg = f"Tokens: {approx}{n:,}   Words: {len(text.split()):,}   Characters: {len(text):,}"
         self.token_label.configure(text=msg)
 
     # ---------------- screens ----------------
@@ -706,7 +897,14 @@ class Studio:
     def tier_index(self):
         return TIERS.index(self.tier.get()) if self.tier.get() in TIERS else 0
 
+    def screen_fit(self, scr, tier=None):
+        tier = self.tier_index() if tier is None else tier
+        return fit_size(scr["W"], scr["H"], TIER_PIXELS[tier], align=self.profile["align"])
+
     def apply_preset(self):
+        if self.mode.get() == "edit":
+            self.update_size_label()
+            return
         name = self.aspect.get()
         scr = self.screen_choice()
         if name == CUSTOM:
@@ -714,7 +912,7 @@ class Studio:
         else:
             self.tier_box.state(["!disabled", "readonly"])
             if scr:
-                w, h = fit_size(scr["W"], scr["H"], TIER_PIXELS[self.tier_index()])
+                w, h = self.screen_fit(scr)
             else:
                 w, h = ASPECTS[name][self.tier_index()]
             self.width.set(w)
@@ -732,7 +930,7 @@ class Studio:
         except tk.TclError:
             return
         scr = self.screen_choice()
-        if scr and fit_size(scr["W"], scr["H"], TIER_PIXELS[self.tier_index()]) == (w, h):
+        if self.mode.get() == "edit" or (scr and self.screen_fit(scr) == (w, h)):
             self.update_size_label()
             return
         match = [(a, t) for a, sizes in ASPECTS.items() for t, s in enumerate(sizes) if s == (w, h)]
@@ -747,13 +945,16 @@ class Studio:
         self.update_size_label()
 
     def checked_size(self):
-        """The size to draw, rounded to multiples of 16, or an error message."""
+        """The size to draw, rounded to the model's multiple (16 or 32), or an error message."""
+        if self.mode.get() == "edit" and not self.edit_src:
+            return None, "Choose the picture to edit (above)."
         try:
             w, h = int(self.width.get()), int(self.height.get())
         except (tk.TclError, ValueError):
             return None, "Width and height must be whole numbers."
-        w, h = (w + 8) // 16 * 16, (h + 8) // 16 * 16
-        longest = MAX_SPAN_SIDE if self.screen_choice() else MAX_SIDE
+        a = self.profile["align"]
+        w, h = (w + a // 2) // a * a, (h + a // 2) // a * a
+        longest = MAX_SPAN_SIDE if (self.screen_choice() and self.mode.get() != "edit") else MAX_SIDE
         if not (256 <= w <= longest and 256 <= h <= longest):
             return None, f"Each side must be between 256 and {longest}."
         if w * h > MAX_PIXELS:
@@ -772,10 +973,12 @@ class Studio:
             exact = (w, h) == (self.width.get(), self.height.get())
         except tk.TclError:
             exact = False
-        note = "" if exact else f"  (rounded to {w} x {h}: sizes are multiples of 16)"
-        text = f"{w} x {h}  ·  {w * h / 1e6:.2f} MP  ·  {estimate(w, h)}{note}"
+        note = "" if exact else f"  (rounded to {w} x {h}: {self.profile['name']} needs multiples of {self.profile['align']})"
+        text = f"{w} x {h}  ·  {w * h / 1e6:.2f} MP  ·  {estimate(w, h, self.profile, self.mode.get() == "edit")}{note}"
         scr = self.screen_choice()
-        if scr:
+        if self.mode.get() == "edit":
+            text = f"Same shape as the picture being edited: {text}"
+        elif scr:
             if (scr["W"], scr["H"]) == (w, h):
                 text = f"Drawn at the screens' exact size: {text}"
             elif self.upscale.get():
@@ -792,7 +995,7 @@ class Studio:
             return int(s["last_seed"]), int(s["last_w"]), int(s["last_h"])
         try:
             folder = Path(self.out_dir.get() or DEFAULT_OUT)
-            files = sorted((p for p in folder.glob("moss_*") if p.suffix.lower() in (".png", ".jpg", ".jpeg")),
+            files = sorted((p for p in folder.glob("*_seed*") if p.suffix.lower() in (".png", ".jpg", ".jpeg")),
                            key=lambda p: p.stat().st_mtime, reverse=True)
         except OSError:
             files = []
@@ -810,9 +1013,10 @@ class Studio:
             self.last_radio.configure(text="Same as the last picture (none yet)")
         mode = self.seed_mode.get()
         if mode == "last" and last:
+            self.select_model(self.settings.get("last_model"))
             shape, tier = self.settings.get("last_shape"), self.settings.get("last_tier")
             if shape in self.screen_opts and tier in TIERS and \
-                    fit_size(self.screen_opts[shape]["W"], self.screen_opts[shape]["H"], TIER_PIXELS[TIERS.index(tier)]) == last[1:]:
+                    self.screen_fit(self.screen_opts[shape], TIERS.index(tier)) == last[1:]:
                 self.aspect.set(shape)
                 self.tier.set(tier)
                 self.apply_preset()
@@ -859,11 +1063,18 @@ class Studio:
     def start(self):
         if self.job:
             return
-        if not self.check_install():
+        editing = self.mode.get() == "edit"
+        if editing and not self.can_edit():
+            return
+        if not self.check_install(edit=editing):
             return
         prompt = tidy_prompt(self.prompt.get("1.0", "end"))
         if not prompt:
-            messagebox.showinfo("MOSS Image Studio", "Type what you want to see first.")
+            messagebox.showinfo("MOSS Image Studio", "Describe what should change first." if editing
+                                else "Type what you want to see first.")
+            return
+        if editing and (not self.edit_src or not self.edit_src.exists()):
+            messagebox.showinfo("Edit a picture", "Choose the picture to edit first.")
             return
         size, err = self.checked_size()
         if err:
@@ -880,37 +1091,52 @@ class Studio:
             messagebox.showerror("Save to", f"Can't use that folder:\n{e}")
             return
         w, h = size
-        scr = self.screen_choice()
+        profile = self.profile
+        scr = None if editing else self.screen_choice()
+        steps, cfg = (profile["edit"]["steps"], profile["edit"]["cfg"]) if editing else (profile["steps"], profile["cfg"])
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         tail = ""
         if scr:
             tail = f"_{'screens' if len(scr['parts']) > 1 else 'screen'}{scr['W']}x{scr['H']}"
-        final = out_dir / f"moss_{stamp}_{w}x{h}_seed{seed}{tail}.{self.fmt.get()}"
+        if editing:
+            tail = "_edit"
+        final = out_dir / f"{profile['prefix']}_{stamp}_{w}x{h}_seed{seed}{tail}.{self.fmt.get()}"
         tokens = self.count_tokens(prompt)
         when = datetime.now()
-        settings = (f"{w}x{h}, seed {seed}, steps {STEPS}, cfg {CFG}, "
-                    f"tokens {tokens if tokens is not None else 'unknown'}, model MOSS-Image SFT int8")
+        settings = (f"{w}x{h}, seed {seed}, steps {steps}, cfg {cfg}, "
+                    f"tokens {tokens if tokens is not None else 'unknown'}, model {profile['name']}")
         if scr:
             names = " + ".join(f"{p['name']} {p['w']}x{p['h']}" for p in scr["parts"])
             settings += f", for screens: {names}" + (f", scaled up to {scr['W']}x{scr['H']}" if self.upscale.get() else "")
-        meta = dict(title=auto_title(prompt), subject="", comment=prompt,
+        if editing:
+            settings += f", edit of {self.edit_src.name}"
+        meta = dict(title=("Edit: " if editing else "") + auto_title(prompt),
+                    subject=f"Edited from {self.edit_src.name}" if editing else "", comment=prompt,
                     authors=self.authors.get().strip(), copyright=self.copyright.get().strip(),
                     tags=M.split_tags(self.tags.get()), software=SOFTWARE,
                     date_taken=when.strftime("%Y:%m:%d %H:%M:%S"), settings=settings)
         job = dict(prompt=prompt, w=w, h=h, seed=seed, final=final, raw=final.with_name(final.stem + ".engine.png"),
-                   tokens=tokens, save_txt=self.save_txt.get(), when=when, meta=meta,
-                   screen=scr, shape=self.aspect.get(), tier=self.tier.get(),
+                   tokens=tokens, save_txt=self.save_txt.get(), when=when, meta=meta, profile=profile,
+                   steps=steps, cfg=cfg, edit_src=self.edit_src.name if editing else None,
+                   screen=scr, shape=self.aspect.get(), tier=self.tier.get(), model=self.model_key,
                    upscale=bool(scr) and self.upscale.get(), split=bool(scr) and self.split.get(), cancelled=False)
-        cmd = [str(SD_CLI),
-               "--diffusion-model", str(MODELS / "moss_image_sft_int8_convrot.safetensors"),
-               "--llm", str(MODELS / "Qwen3.5-9B-Q4_K_M.gguf"),
-               "--vae", str(MODELS / "flux2-vae.safetensors"),
-               "--tokenizer", str(TOKENIZER),
-               "--cfg-scale", str(CFG), "--steps", str(STEPS),
-               "-H", str(h), "-W", str(w), "-s", str(seed), "--offload-to-cpu"]
+        cmd = [str(SD_CLI)]
+        files = dict(profile["files"])
+        if editing:
+            files.update(profile["edit"]["files"])
+        for option, rel in files.items():
+            cmd += [option, str(MODELS / rel)]
+        cmd += ["--cfg-scale", str(cfg), "--steps", str(steps),
+                "-H", str(h), "-W", str(w), "-s", str(seed), "--offload-to-cpu"]
+        if profile["sampler"]:
+            cmd += ["--sampling-method", profile["sampler"]]
         if w * h > TILE_ABOVE:
             cmd.append("--vae-tiling")
-        cmd += ["-p", prompt, "-o", str(job["raw"])]
+        engine_prompt = prompt
+        if editing:
+            cmd += ["-r", str(self.edit_src)]
+            engine_prompt += profile["edit"]["prompt_suffix"]
+        cmd += ["-p", engine_prompt, "-o", str(job["raw"])]
 
         self.save_settings()
         self.log_lines = []
@@ -1025,7 +1251,7 @@ class Studio:
         self.status.configure(text=f"Done in {secs // 60}:{secs % 60:02d}.{extra}")
         self.progress["value"] = 100
         self.settings.update(last_seed=job["seed"], last_w=job["w"], last_h=job["h"],
-                             last_shape=job["shape"], last_tier=job["tier"])
+                             last_shape=job["shape"], last_tier=job["tier"], last_model=job["model"])
         self.save_settings()
         self.on_seed_mode()
         self.show_picture(files[0])
@@ -1116,19 +1342,33 @@ class Studio:
             self.show_picture(path)
 
     def settings_from(self, path):
-        """(prompt, w, h, seed) from a picture's details or file name."""
+        """(prompt, w, h, seed, model key) from a picture's details or file name."""
         meta = M.read(path)
-        m = SETTINGS_RE.search(meta.get("settings", "")) or NAME_RE.search(Path(path).name)
+        text = meta.get("settings", "")
+        model = next((k for k, p in PROFILES.items() if f"model {p['name']}" in text), None)
+        if model is None:   # older pictures: tell by the file name, else MOSS
+            model = next((k for k, p in PROFILES.items() if Path(path).name.startswith(p["prefix"] + "_")), None)
+        m = SETTINGS_RE.search(text) or NAME_RE.search(Path(path).name)
         if not m:
-            return meta.get("comment", ""), None, None, None
-        return meta.get("comment", ""), int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return meta.get("comment", ""), None, None, None, model
+        return meta.get("comment", ""), int(m.group(1)), int(m.group(2)), int(m.group(3)), model
+
+    def select_model(self, key):
+        if key in PROFILES and key != self.model_key:
+            self.model_key = key
+            self.refresh_model_list()
+            self.update_tokens()
 
     def apply_reuse(self, path):
         try:
-            prompt, w, h, seed = self.settings_from(path)
+            prompt, w, h, seed, model = self.settings_from(path)
         except Exception as e:
             messagebox.showerror("Use an earlier picture", f"Could not read that picture:\n{e}")
             return
+        if self.mode.get() == "edit":
+            self.mode.set("new")
+            self.on_mode_change()
+        self.select_model(model)
         if prompt:
             self.prompt.delete("1.0", "end")
             self.prompt.insert("1.0", prompt)
@@ -1138,8 +1378,8 @@ class Studio:
             m = re.search(r"_screens?(\d+)x(\d+)", Path(path).name)
             if m:   # a screen picture: pick the same screen choice if those screens are still connected
                 for label, o in self.screen_opts.items():
-                    for t, px in enumerate(TIER_PIXELS):
-                        if (o["W"], o["H"]) == (int(m.group(1)), int(m.group(2))) and fit_size(o["W"], o["H"], px) == (w, h):
+                    for t in range(len(TIER_PIXELS)):
+                        if (o["W"], o["H"]) == (int(m.group(1)), int(m.group(2))) and self.screen_fit(o, t) == (w, h):
                             picked = (label, TIERS[t])
             if picked:
                 self.aspect.set(picked[0])
