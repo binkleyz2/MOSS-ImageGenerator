@@ -4,19 +4,21 @@
 
 **Make AI pictures on your own Windows PC: no cloud service, no account, no per-image cost.**
 
-MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) text-to-image model from OpenMOSS. It can also use **FLUX.2 Klein** and **Qwen Image 2.1**, and it can **edit existing pictures** by instruction. Everything runs locally on an NVIDIA graphics card through [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp). Type what you want to see, pick a size, and the picture is made on your machine.
+MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) text-to-image model from OpenMOSS. It can also use **FLUX.2 Klein** and **Qwen Image 2.1**, and it can **edit existing pictures** by instruction. Everything runs locally on an NVIDIA graphics card, except for the optional **Nano Banana** cloud model, which runs through [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp). Nano Banana runs on Google's servers with your own API key. Type what you want to see, pick a size, and the picture is made on your machine.
 
 ![MOSS Image Studio in dark mode](docs/images/studio-dark.png)
 
 ## Features
 
-- **Three models in one app.** Pick one from the **Model** list:
+- **Four models in one app.** Pick one from the **Model** list:
 
   | Model | Good at | Speed (1 MP picture) | Edits pictures | License |
   | --- | --- | --- | --- | --- |
   | **MOSS-Image SFT** (installed by default) | Detailed scenes, readable text | about 40 s | Yes | Apache-2.0 |
   | **FLUX.2 Klein 4B** (optional, 8.6 GB) | Photos and general pictures, very fast | about 10 s | Yes | Apache-2.0 |
   | **Qwen Image 2.1** (optional, 14 GB) | Text in pictures, complex layouts | about 40 s | Yes\* | Qwen Research (non-commercial) |
+
+  | **Nano Banana 2.1** (optional, Google cloud) | Following detailed instructions, editing | usually 10-40 s | Yes | Google Gemini API terms; about $0.03-0.11 per picture |
 
   \*Qwen edits normal pictures well, in about 50 s at 1 MP. Very dark pictures can come out over-brightened, so use MOSS or FLUX for those.
 - **Edit a picture by instruction.** Choose **Edit a picture**, pick any PNG or JPEG, and describe the change, e.g. *"Change only the orange cat to a black cat. Keep everything else unchanged."* The rest of the picture stays as it was.
@@ -95,6 +97,12 @@ Same seed, one word changed (*orange cat* to *black cat*):
    powershell -ExecutionPolicy Bypass -File .\download-models.ps1
    ```
 
+5. **Optional: Nano Banana (Google cloud).** This model runs on Google's servers, not your PC.
+   1. Get a Gemini API key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Image generation needs billing turned on.
+   2. In the app, choose **Nano Banana 2.1** and click **API key...**. The key is stored encrypted, readable only by your Windows account. Setting the `GEMINI_API_KEY` environment variable works too.
+
+   Each picture is billed to your key: about $0.03 at 1K, $0.05 at 2K, $0.11 at 4K. Your prompt, and the picture when editing, is sent to Google, and Google adds its invisible SynthID watermark. Nano Banana has no seeds, so every picture is new.
+
 If the app opens with a message that the engine or models weren't found, it's in the wrong folder or the installer hasn't finished. The message lists exactly what's missing.
 
 ## Using it
@@ -157,6 +165,8 @@ It makes one small picture through the app and writes `selftest-result.json`.
 - **Antivirus warning about the `.exe`.** Some antivirus tools are wary of programs packaged with PyInstaller. You can build it yourself (see above) or run from source.
 - **The installer fell back to the GGUF model.** The app and launcher expect the int8 model (`moss_image_sft_int8_convrot.safetensors`). Change the MOSS model file name in `PROFILES` near the top of `moss_gui.py`, and in `MOSS Image.bat`.
 - **A model is marked *(not downloaded)*, or Edit says files are missing.** Run `download-models.ps1` and pick that model or the MOSS editing add-on.
+- **Nano Banana says the key wasn't accepted (401), isn't allowed (403) or is out of quota (429).** Check the key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and that billing is turned on. Google has no free tier for image output.
+- **Nano Banana returned no picture.** Google's content rules blocked the prompt. The app shows any reason Google gave.
 - **A Qwen edit looks over-brightened or harsh.** This happens with very dark pictures. Use MOSS or FLUX for those.
 
 ## What's in this repo
@@ -166,6 +176,7 @@ It makes one small picture through the app and writes `selftest-result.json`.
 | `installer-moss-image.ps1` | Downloads and sets up the engine and MOSS-Image, and makes a test picture |
 | `download-models.ps1` | Downloads the optional models: MOSS editing add-on, FLUX.2 Klein, Qwen Image 2.1 |
 | `moss-image-pc/tools/moss_gui.py` | MOSS Image Studio |
+| `moss-image-pc/tools/moss_cloud.py` | Nano Banana: Google Gemini API requests and the encrypted API key |
 | `moss-image-pc/tools/moss_meta.py` | Reads and writes picture details (EXIF / XMP / PNG text) |
 | `moss-image-pc/tools/prompt_info.py` | Token counter and prompt `.txt` writer used by the launcher |
 | `moss-image-pc/MOSS Image.bat` | Command-window launcher |
@@ -205,6 +216,8 @@ The optional models belong to their makers:
 - **[Qwen Image 2.1](https://huggingface.co/Qwen/Qwen-Image-2.1)** by the Qwen team (Qwen Research license: non-commercial use).
   - Files from [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1).
   - Text encoder: [Qwen3-VL-8B](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF).
+
+**[Nano Banana](https://aistudio.google.com/docs/image-generation)** (Gemini image models) is Google's. It runs on Google's servers under the Gemini API terms, with each user's own API key.
 
 This project also relies on:
 

@@ -23,9 +23,10 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
+import moss_cloud as C
 import moss_meta as M
 
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -89,12 +90,21 @@ PROFILES = {
         # edit takes about 50 s. Very dark sources get blown-out shadows, so MOSS or FLUX suit those.
         edit=dict(files={"--llm_vision": "qwen-image-2.1/mmproj-Qwen3VL-8B-Instruct-F16.gguf"},
                   need=[], prompt_suffix="", steps=40, cfg=6.0, extra_secs=10)),
+    "nano-banana": dict(
+        name="Nano Banana 2.1 (Google cloud)", prefix="nanobanana", cloud=True,
+        license="Google Gemini API terms",
+        files={}, steps=0, cfg=0, sampler=None, align=16, step_secs=0, exact_tokens=False,
+        note="Runs on Google's servers with your Gemini API key, about $0.03-0.11 per picture. "
+             "Your prompt (and picture, when editing) goes to Google; pictures carry its SynthID watermark.",
+        edit=dict(files={}, need=[], prompt_suffix="", steps=0, cfg=0)),
 }
 DEFAULT_PROFILE = "moss"
 
 
 def profile_files(profile, edit=False):
     """Paths of every file a model needs (for new pictures, or for editing too)."""
+    if profile.get("cloud"):
+        return []
     paths = [MODELS / p for opt, p in profile["files"].items()]
     if edit and profile["edit"]:
         paths += [MODELS / p for opt, p in profile["edit"]["files"].items() if opt != "--lora-model-dir"]
@@ -132,6 +142,8 @@ DARK = dict(bg="#1f2023", field="#2b2d31", fg="#e8e8e8", hint="#a0a4ab", error="
 def estimate(w, h, profile=None, editing=False):
     """Rough time on this PC (RTX 4070 Ti SUPER), from earlier runs."""
     profile = profile or PROFILES[DEFAULT_PROFILE]
+    if profile.get("cloud"):
+        return "usually 10-40 s"
     steps = profile["edit"]["steps"] if editing and profile["edit"] else profile["steps"]
     secs = 10 + steps * profile["step_secs"] * ((w * h / 1e6) / 1.04) ** profile.get("size_power", 1.25)
     if editing and profile["edit"]:
@@ -400,6 +412,8 @@ class Studio:
 
     def missing_files(self, key=None, edit=False):
         profile = PROFILES[key or self.model_key]
+        if profile.get("cloud"):
+            return []
         return [p for p in [SD_CLI] + profile_files(profile, edit) if not p.exists()]
 
     def check_install(self, edit=False):
@@ -424,8 +438,67 @@ class Studio:
         return False
 
     def model_label(self, key):
+        if PROFILES[key].get("cloud"):
+            return PROFILES[key]["name"] + ("" if C.find_key(self.settings) else "  (needs API key)")
         installed = not self.missing_files(key)
         return PROFILES[key]["name"] + ("" if installed else "  (not downloaded)")
+
+    # ---------------- Nano Banana (cloud) API key ----------------
+    def edit_api_key(self):
+        """Ask for the Gemini API key. It is stored encrypted for this Windows account only."""
+        win = tk.Toplevel(self.root)
+        win.title("Gemini API key")
+        win.transient(self.root)
+        win.resizable(False, False)
+        if self.colors is DARK:
+            win.configure(background=DARK["bg"])
+        frame = ttk.Frame(win, padding=14)
+        frame.pack(fill="both", expand=True)
+        has_key = bool(self.settings.get("gemini_key"))
+        env = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+        text = ("Nano Banana runs on Google's servers and is billed to your own Gemini API key.\n"
+                f"Get a key at {C.KEY_PAGE} (billing must be turned on for image generation).\n\n"
+                "The key is saved encrypted, readable only by your Windows account on this PC.")
+        if env:
+            text += "\n\nThe GEMINI_API_KEY environment variable is set; it is used instead of a saved key."
+        ttk.Label(frame, text=text, wraplength=460, justify="left").grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text="API key").grid(row=1, column=0, sticky="w", pady=(12, 0))
+        key_var = tk.StringVar()
+        entry = ttk.Entry(frame, textvariable=key_var, show="*", width=48)
+        entry.grid(row=1, column=1, columnspan=2, sticky="we", pady=(12, 0), padx=(8, 0))
+        entry.focus_set()
+        status = ttk.Label(frame, text="A key is saved." if has_key else "No key saved yet.", style="Hint.TLabel")
+        status.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        def save():
+            key = key_var.get().strip()
+            if not key:
+                messagebox.showinfo("Gemini API key", "Paste your key first.", parent=win)
+                return
+            try:
+                self.settings["gemini_key"] = C.encrypt_key(key)
+            except OSError as e:
+                messagebox.showerror("Gemini API key", str(e), parent=win)
+                return
+            self.save_settings()
+            self.refresh_model_list()
+            win.destroy()
+
+        def remove():
+            self.settings.pop("gemini_key", None)
+            self.save_settings()
+            self.refresh_model_list()
+            win.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="Save key", command=save).pack(side="left")
+        ttk.Button(buttons, text="Remove saved key", command=remove,
+                   state="normal" if has_key else "disabled").pack(side="left", padx=6)
+        ttk.Button(buttons, text="Cancel", command=win.destroy).pack(side="left")
+        win.bind("<Return>", lambda e: save())
+        win.grab_set()
+        self.root.wait_window(win)
 
     # ---------------- settings ----------------
     def load_settings(self):
@@ -478,6 +551,7 @@ class Studio:
                         command=self.on_mode_change).pack(side="left", padx=(8, 0))
         self.model_note = ttk.Label(box, text="", style="Hint.TLabel", wraplength=440)
         self.model_note.grid(row=1, column=0, columnspan=4, sticky="w")
+        self.key_btn = ttk.Button(box, text="API key...", command=self.edit_api_key)
         # Picture to edit (Edit mode only)
         self.edit_row = ttk.Frame(box)
         self.edit_row.grid(row=2, column=0, columnspan=4, sticky="we", pady=(6, 0))
@@ -785,6 +859,14 @@ class Studio:
         self.model_box.configure(values=[self.model_label(k) for k in PROFILES])
         self.model_var.set(self.model_label(self.model_key))
         p = self.profile
+        if p.get("cloud"):           # the key button sits beside the description
+            self.model_note.grid_configure(columnspan=2)
+            self.model_note.configure(wraplength=330)
+            self.key_btn.grid(row=1, column=2, columnspan=2, sticky="ne", padx=(8, 0))
+        else:
+            self.key_btn.grid_remove()
+            self.model_note.grid_configure(columnspan=4)
+            self.model_note.configure(wraplength=440)
         self.model_note.configure(text=f"{p['note']}  License: {p['license']}.")
         for sp in self.spins:
             sp.configure(increment=p["align"])
@@ -1012,6 +1094,25 @@ class Studio:
         except tk.TclError:
             exact = False
         note = "" if exact else f"  (rounded to {w} x {h}: {self.profile['name']} needs multiples of {self.profile['align']})"
+        if self.profile.get("cloud"):
+            if self.mode.get() == "edit":
+                size = C.size_for_pixels(w * h)
+                text = (f"Google keeps the picture's shape, at {size} size  ·  about ${C.PRICE_USD[size]:.2f}  ·  "
+                        "usually 10-40 s  ·  no seeds")
+            else:
+                scr = self.screen_choice()
+                rw, rh = (scr["W"], scr["H"]) if scr else (w, h)
+                aspect, size = C.nearest_aspect(rw, rh), C.size_for_pixels(w * h)
+                ow, oh = C.SIZES_1K[aspect][0] * C.SCALE[size], C.SIZES_1K[aspect][1] * C.SCALE[size]
+                cw, ch = C.crop_size(ow, oh, rw / rh)
+                trim = "" if (cw, ch) == (ow, oh) else f", trimmed to {cw} x {ch}"
+                after = ""
+                if scr and self.upscale.get():
+                    after = f", then scaled to {scr['W']} x {scr['H']}"
+                text = (f"Google makes {ow} x {oh} ({aspect}, {size}){trim}{after}  ·  about ${C.PRICE_USD[size]:.2f}  ·  "
+                        "usually 10-40 s  ·  no seeds")
+            self.size_label.configure(text=text, foreground=self.colors["hint"])
+            return
         text = f"{w} x {h}  ·  {w * h / 1e6:.2f} MP  ·  {estimate(w, h, self.profile, self.mode.get() == "edit")}{note}"
         scr = self.screen_choice()
         if self.mode.get() == "edit":
@@ -1069,6 +1170,8 @@ class Studio:
             self.seed_hint.configure(text="")
 
     def chosen_seed(self):
+        if self.profile.get("cloud"):
+            return None, None          # Nano Banana has no seed setting
         mode = self.seed_mode.get()
         if mode == "last":
             last = self.last_picture()
@@ -1130,6 +1233,9 @@ class Studio:
             return
         w, h = size
         profile = self.profile
+        if profile.get("cloud"):
+            self.start_cloud(prompt, w, h, editing, out_dir)
+            return
         scr = None if editing else self.screen_choice()
         steps, cfg = (profile["edit"]["steps"], profile["edit"]["cfg"]) if editing else (profile["steps"], profile["cfg"])
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -1195,8 +1301,116 @@ class Studio:
         self.job = job
         threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
 
+    def start_cloud(self, prompt, w, h, editing, out_dir):
+        """Nano Banana: send the request to Google in a worker thread."""
+        api_key = C.find_key(self.settings)
+        if not api_key:
+            self.edit_api_key()
+            api_key = C.find_key(self.settings)
+            if not api_key:
+                return
+        scr = None if editing else self.screen_choice()
+        if editing:
+            with Image.open(self.edit_src) as im:
+                sw, sh = im.size
+            aspect, size = None, C.size_for_pixels(sw * sh)
+            target = None
+            label = f"{size}_edit"
+        else:
+            rw, rh = (scr["W"], scr["H"]) if scr else (w, h)
+            aspect = C.nearest_aspect(rw, rh)
+            size = C.size_for_pixels(w * h)
+            target = rw / rh                       # trim Google's picture to exactly this shape
+            label = f"{aspect.replace(':', 'x')}_{size}"
+            if scr:
+                label += f"_{'screens' if len(scr['parts']) > 1 else 'screen'}{scr['W']}x{scr['H']}"
+        price = C.PRICE_USD[size]
+        if not self.settings.get("cloud_ok"):
+            sent = "your prompt and the picture" if editing else "your prompt"
+            if not messagebox.askokcancel(
+                    "Nano Banana (Google cloud)",
+                    f"This sends {sent} to Google, and each picture is billed to your Gemini API key "
+                    f"(about ${price:.2f} at {size} size).\n\nPictures from Google carry its invisible SynthID "
+                    "watermark. Continue? (You won't be asked again.)"):
+                return
+            self.settings["cloud_ok"] = True
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        final = out_dir / f"{self.profile['prefix']}_{stamp}_{label}.{self.fmt.get()}"
+        when = datetime.now()
+        tokens = self.count_tokens(prompt)
+        meta = dict(title=("Edit: " if editing else "") + auto_title(prompt),
+                    subject=f"Edited from {self.edit_src.name}" if editing else "", comment=prompt,
+                    authors=self.authors.get().strip(), copyright=self.copyright.get().strip(),
+                    tags=M.split_tags(self.tags.get()), software=SOFTWARE,
+                    date_taken=when.strftime("%Y:%m:%d %H:%M:%S"), settings="")
+        job = dict(prompt=prompt, w=w, h=h, seed="n/a", final=final, raw=final.with_name(final.stem + ".engine.png"),
+                   tokens=tokens, save_txt=self.save_txt.get(), when=when, meta=meta, profile=self.profile,
+                   steps="n/a", cfg="n/a", edit_src=self.edit_src.name if editing else None,
+                   edit_path=self.edit_src if editing else None,
+                   screen=scr, shape=self.aspect.get(), tier=self.tier.get(), model=self.model_key,
+                   upscale=bool(scr) and self.upscale.get(), split=bool(scr) and self.split.get(),
+                   cancelled=False, cloud=True, proc=None, api_key=api_key,
+                   aspect=aspect, size=size, target=target, price=price)
+        self.save_settings()
+        self.log_lines = []
+        self.set_log("")
+        self.go_btn.state(["disabled"])
+        self.cancel_btn.state(["!disabled"])
+        self.progress.configure(mode="indeterminate")
+        self.progress.start(12)
+        self.status.configure(text="Sending to Google...")
+        self.started = time.time()
+        self.job = job
+        threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
+
+    def run_cloud(self, job):
+        """Worker thread for Nano Banana: ask Google, trim to shape, then finish the files like a local picture."""
+        say = lambda msg: self.events.put(("status", msg))
+        say("Waiting for Google (usually 10-40 seconds)...")
+        try:
+            source = mime = None
+            if job["edit_path"]:
+                source = Path(job["edit_path"]).read_bytes()
+                mime = "image/jpeg" if Path(job["edit_path"]).suffix.lower() in (".jpg", ".jpeg") else "image/png"
+            picture = C.generate(job["api_key"], job["prompt"], aspect=job["aspect"], size=job["size"],
+                                 image_bytes=source, image_mime=mime or "image/png")
+        except C.CloudError as e:
+            self.events.put(("done", (job, None, str(e))))
+            return
+        if job["cancelled"]:
+            self.events.put(("done", (job, None, None)))
+            return
+        try:
+            import io
+            with Image.open(io.BytesIO(picture)) as im:
+                im = im.convert("RGB")
+                if job["target"]:                     # trim to the exact shape asked for
+                    cw, ch = C.crop_size(im.width, im.height, job["target"])
+                    left, top = (im.width - cw) // 2, (im.height - ch) // 2
+                    im = im.crop((left, top, left + cw, top + ch))
+                im.save(job["raw"], "PNG", compress_level=1)
+                job["w"], job["h"] = im.size
+            settings = (f"{job['w']}x{job['h']}, Google {job['size']}" + (f" {job['aspect']}" if job["aspect"] else "")
+                        + f", about ${job['price']:.2f}, tokens {job['tokens'] if job['tokens'] is not None else 'unknown'}, "
+                        f"model {job['profile']['name']}")
+            if job["screen"]:
+                names = " + ".join(f"{p['name']} {p['w']}x{p['h']}" for p in job["screen"]["parts"])
+                settings += f", for screens: {names}" + (f", scaled to {job['screen']['W']}x{job['screen']['H']}"
+                                                         if job["upscale"] else "")
+            if job["edit_src"]:
+                settings += f", edit of {job['edit_src']}"
+            job["meta"]["settings"] = settings
+            self.events.put(("saving", job))
+            files = finish_files(job, say)
+            self.events.put(("done", (job, files, None)))
+        except Exception as e:
+            self.events.put(("done", (job, None, f"Google's picture could not be saved: {e}")))
+
     def run_job(self, job):
         """Worker thread: read the engine's output, then finish the files."""
+        if job.get("cloud"):
+            self.run_cloud(job)
+            return
         proc, buf = job["proc"], b""
         while True:
             chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(4096)
@@ -1286,6 +1500,9 @@ class Studio:
                 self.status.configure(text="Not enough memory for this size.")
                 messagebox.showerror("MOSS Image Studio", memory_advice(job))
                 return
+            if job.get("cloud"):
+                messagebox.showerror("Nano Banana (Google cloud)", f"Sorry: {error}")
+                return
             tail = "\n".join(self.log_lines[-12:])
             messagebox.showerror("MOSS Image Studio", f"Sorry: {error}\n\nLast engine messages:\n{tail}")
             return
@@ -1293,8 +1510,9 @@ class Studio:
         extra = f" ({len(files) - 1} screen pictures too)" if len(files) > 1 else ""
         self.status.configure(text=f"Done in {secs // 60}:{secs % 60:02d}.{extra}")
         self.progress["value"] = 100
-        self.settings.update(last_seed=job["seed"], last_w=job["w"], last_h=job["h"],
-                             last_shape=job["shape"], last_tier=job["tier"], last_model=job["model"])
+        if not job.get("cloud"):     # cloud pictures have no seed to reuse
+            self.settings.update(last_seed=job["seed"], last_w=job["w"], last_h=job["h"],
+                                 last_shape=job["shape"], last_tier=job["tier"], last_model=job["model"])
         self.save_settings()
         self.on_seed_mode()
         self.show_picture(files[0])
@@ -1312,7 +1530,8 @@ class Studio:
         if job:
             job["cancelled"] = True       # its worker thread removes the unfinished file
             try:
-                job["proc"].kill()
+                if job.get("proc"):
+                    job["proc"].kill()
             except OSError:
                 pass
             self.job = None               # ready for a new picture right away
