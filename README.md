@@ -149,7 +149,11 @@ It makes one small picture through the app and writes `selftest-result.json`.
 ## Troubleshooting
 
 - **"Engine or models not found."** Run the installer, then put the `.exe` in `moss-image-pc` or the folder above it.
-- **Running out of graphics memory on big sizes.** Pick a smaller Size. Pictures over 2 MP are already decoded in tiles to save memory.
+- **"Ran out of memory" on big sizes.** The app says how much memory Windows has free. To fix it:
+  - Pick a smaller Size, or switch to FLUX, which needs the least memory.
+  - Restart Windows if it has been running for days. Some Windows services slowly hold on to more and more memory, and the engine checks how much Windows can still promise before it starts.
+
+  Pictures over 2 MP are already decoded in tiles to save memory.
 - **Antivirus warning about the `.exe`.** Some antivirus tools are wary of programs packaged with PyInstaller. You can build it yourself (see above) or run from source.
 - **The installer fell back to the GGUF model.** The app and launcher expect the int8 model (`moss_image_sft_int8_convrot.safetensors`). Change the MOSS model file name in `PROFILES` near the top of `moss_gui.py`, and in `MOSS Image.bat`.
 - **A model is marked *(not downloaded)*, or Edit says files are missing.** Run `download-models.ps1` and pick that model or the MOSS editing add-on.

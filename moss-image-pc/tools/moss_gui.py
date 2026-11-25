@@ -25,7 +25,7 @@ from PIL import Image, ImageTk
 
 import moss_meta as M
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -245,6 +245,39 @@ def screen_options(screens):
         label = "Screen" if n == 1 else f"Screen: {s['name']}"
         opts[f"{label} ({o['W']} x {o['H']})"] = o
     return opts
+
+
+MEMORY_ERROR_RE = re.compile(r"capacity exceeded|out of memory|cannot make enough memory available|"
+                             r"failed during (weight preparation|workspace allocation)", re.I)
+
+
+def memory_free_gb():
+    """(free RAM, free commit) in GB, as Windows reports them; commit = what programs can still reserve."""
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+    m = MEMORYSTATUSEX()
+    m.dwLength = ctypes.sizeof(m)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+        return None, None
+    return m.ullAvailPhys / 2**30, m.ullAvailPageFile / 2**30
+
+
+def memory_advice(job):
+    ram, commit = memory_free_gb()
+    mem = (f"Right now Windows has {ram:.0f} GB of RAM free and can promise programs "
+           f"{commit:.0f} GB more memory in total.\n\n") if ram is not None else ""
+    return (f"{job['profile']['name']} ran out of memory at {job['w']} x {job['h']} "
+            f"({job['w'] * job['h'] / 1e6:.1f} MP), so no picture was made.\n\n{mem}"
+            "What helps:\n"
+            "  - Choose a smaller Size (Standard ~1 MP needs the least).\n"
+            "  - Close other big programs.\n"
+            "  - Restart Windows if it has been running for days: some Windows services slowly hold on "
+            "to more and more memory, and a restart frees it.\n"
+            "  - Or use another model: FLUX.2 Klein needs the least memory.")
 
 
 def windows_uses_dark():
@@ -1243,6 +1276,11 @@ class Studio:
             return
         if error:
             self.status.configure(text="No picture was made." if files is None else "Problem saving.")
+            log = "\n".join(self.log_lines)
+            if MEMORY_ERROR_RE.search(log):
+                self.status.configure(text="Not enough memory for this size.")
+                messagebox.showerror("MOSS Image Studio", memory_advice(job))
+                return
             tail = "\n".join(self.log_lines[-12:])
             messagebox.showerror("MOSS Image Studio", f"Sorry: {error}\n\nLast engine messages:\n{tail}")
             return
