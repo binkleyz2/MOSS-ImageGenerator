@@ -16,9 +16,9 @@ MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/
   | --- | --- | --- | --- | --- |
   | **MOSS-Image SFT** (installed by default) | Detailed scenes, readable text | about 40 s | Yes | Apache-2.0 |
   | **FLUX.2 Klein 4B** (optional, 8.6 GB) | Photos and general pictures, very fast | about 10 s | Yes | Apache-2.0 |
-  | **Qwen Image 2.1** (optional, 13 GB) | Text in pictures, complex layouts | about 40 s | Not yet\* | Qwen Research (non-commercial) |
+  | **Qwen Image 2.1** (optional, 14 GB) | Text in pictures, complex layouts | about 40 s | Yes\* | Qwen Research (non-commercial) |
 
-  \*Qwen Image 2.1 can edit in principle, but it needs more memory than a 16 GB card here, so the app only uses it for new pictures.
+  \*Qwen edits normal pictures well, in about 50 s at 1 MP. Very dark pictures can come out over-brightened, so use MOSS or FLUX for those.
 - **Edit a picture by instruction.** Choose **Edit a picture**, pick any PNG or JPEG, and describe the change, e.g. *"Change only the orange cat to a black cat. Keep everything else unchanged."* The rest of the picture stays as it was.
 - **Prompt box with a live token count.** It counts with MOSS's own Qwen 3.5 tokenizer (exact for MOSS, close for the other models) and handles long, multi-line prompts with quotes and special characters.
 - **Sizes and shapes.** Presets for common shapes (16:9, 9:16, 1:1, 4:3, 3:2, 21:9 ...) at four sizes, from about 1 MP (around a minute) up to about 5 MP, e.g. 3440 x 1440. You can also type a custom size.
@@ -68,7 +68,7 @@ Same seed, one word changed (*orange cat* to *black cat*):
 
 - Windows 10 or 11, 64-bit.
 - An NVIDIA graphics card, ideally with 16 GB of memory; it's built and tested on an RTX 4070 Ti SUPER. On smaller cards the installer may fall back to a smaller model; see *Troubleshooting*.
-- About 13 GB of free disk space for the engine and MOSS-Image, plus 8.6 GB for FLUX and 13 GB for Qwen if you add them.
+- About 13 GB of free disk space for the engine and MOSS-Image, plus 8.6 GB for FLUX and 14 GB for Qwen if you add them.
 - An internet connection for the one-time download.
 
 ## Quick start
@@ -87,7 +87,7 @@ Same seed, one word changed (*orange cat* to *black cat*):
 4. **Optional: add more models.** Run `download-models.ps1` and pick any of:
    - the editing add-on for MOSS (1.4 GB);
    - FLUX.2 Klein (8.6 GB);
-   - Qwen Image 2.1 (13 GB).
+   - Qwen Image 2.1 (14 GB).
 
    Each download is checked against Hugging Face's published size and checksum.
 
@@ -107,7 +107,7 @@ If the app opens with a message that the engine or models weren't found, it's in
 
 **To change one detail**, there are two ways:
 
-- **Edit a picture** (MOSS with the editing add-on, or FLUX):
+- **Edit a picture** (any model; MOSS needs its editing add-on):
   1. Choose **Edit a picture** at the top, then **Use the picture shown** or **Choose...**.
   2. Describe only the change, e.g. *"Change only the X to Y. Keep everything else unchanged."*
   3. Click **Edit picture**. The new picture keeps the original's size and gets `_edit` in its name.
@@ -157,7 +157,7 @@ It makes one small picture through the app and writes `selftest-result.json`.
 - **Antivirus warning about the `.exe`.** Some antivirus tools are wary of programs packaged with PyInstaller. You can build it yourself (see above) or run from source.
 - **The installer fell back to the GGUF model.** The app and launcher expect the int8 model (`moss_image_sft_int8_convrot.safetensors`). Change the MOSS model file name in `PROFILES` near the top of `moss_gui.py`, and in `MOSS Image.bat`.
 - **A model is marked *(not downloaded)*, or Edit says files are missing.** Run `download-models.ps1` and pick that model or the MOSS editing add-on.
-- **Qwen Image 2.1 in Edit mode.** Qwen can't edit in this app yet because it runs out of memory on a 16 GB card. Use MOSS or FLUX for editing.
+- **A Qwen edit looks over-brightened or harsh.** This happens with very dark pictures. Use MOSS or FLUX for those.
 
 ## What's in this repo
 

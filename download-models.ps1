@@ -24,11 +24,12 @@ $catalog = [ordered]@{
             @('flux2-klein-4b\Qwen3-4B-Q8_0.gguf',        "$HF/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q8_0.gguf"))
     }
     'qwen' = @{
-        Name = 'Qwen Image 2.1 (text in pictures; new pictures only)'; Size = '13.0 GB'; License = 'Qwen Research (non-commercial)'
+        Name = 'Qwen Image 2.1 (text in pictures, also edits)'; Size = '14.1 GB'; License = 'Qwen Research (non-commercial)'
         Files = @(
             @('qwen-image-2.1\qwen_image_2.1_int8_convrot.safetensors', "$HF/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors"),
             @('qwen-image-2.1\qwen_image_2.1_vae_bf16.safetensors',     "$HF/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors"),
-            @('qwen-image-2.1\Qwen3VL-8B-Instruct-Q4_K_M.gguf',         "$HF/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/Qwen3VL-8B-Instruct-Q4_K_M.gguf"))
+            @('qwen-image-2.1\Qwen3VL-8B-Instruct-Q4_K_M.gguf',         "$HF/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+            @('qwen-image-2.1\mmproj-Qwen3VL-8B-Instruct-F16.gguf',     "$HF/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-8B-Instruct-F16.gguf"))
     }
 }
 

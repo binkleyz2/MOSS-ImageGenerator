@@ -25,7 +25,7 @@ from PIL import Image, ImageTk
 
 import moss_meta as M
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -82,11 +82,13 @@ PROFILES = {
         files={"--diffusion-model": "qwen-image-2.1/qwen_image_2.1_int8_convrot.safetensors",
                "--vae": "qwen-image-2.1/qwen_image_2.1_vae_bf16.safetensors",
                "--llm": "qwen-image-2.1/Qwen3VL-8B-Instruct-Q4_K_M.gguf"},
-        steps=40, cfg=6.0, sampler="euler", align=32, step_secs=0.75, exact_tokens=False,
-        note="Strong at text in pictures and complex layouts. 40 steps. New pictures only.",
-        # Editing works in the engine but needs more memory than a 16 GB card + 64 GB PC gives it
-        # here (13+ minutes and poor results), so it is turned off.
-        edit=None),
+        steps=40, cfg=6.0, sampler="euler", align=32, step_secs=0.75, size_power=1.45, exact_tokens=False,
+        note="Strong at text in pictures and complex layouts. 40 steps. "
+             "Edits work well, but very dark pictures can come out over-brightened.",
+        # Editing needs plenty of free Windows commit memory (see memory_advice); with it, a 1 MP
+        # edit takes about 50 s. Very dark sources get blown-out shadows, so MOSS or FLUX suit those.
+        edit=dict(files={"--llm_vision": "qwen-image-2.1/mmproj-Qwen3VL-8B-Instruct-F16.gguf"},
+                  need=[], prompt_suffix="", steps=40, cfg=6.0, extra_secs=10)),
 }
 DEFAULT_PROFILE = "moss"
 
@@ -131,7 +133,7 @@ def estimate(w, h, profile=None, editing=False):
     """Rough time on this PC (RTX 4070 Ti SUPER), from earlier runs."""
     profile = profile or PROFILES[DEFAULT_PROFILE]
     steps = profile["edit"]["steps"] if editing and profile["edit"] else profile["steps"]
-    secs = 10 + steps * profile["step_secs"] * ((w * h / 1e6) / 1.04) ** 1.25
+    secs = 10 + steps * profile["step_secs"] * ((w * h / 1e6) / 1.04) ** profile.get("size_power", 1.25)
     if editing and profile["edit"]:
         secs += profile["edit"].get("extra_secs", 0)
     if secs < 50:
@@ -986,8 +988,11 @@ class Studio:
         except (tk.TclError, ValueError):
             return None, "Width and height must be whole numbers."
         a = self.profile["align"]
-        w, h = (w + a // 2) // a * a, (h + a // 2) // a * a
         longest = MAX_SPAN_SIDE if (self.screen_choice() and self.mode.get() != "edit") else MAX_SIDE
+        rw, rh = (w + a // 2) // a * a, (h + a // 2) // a * a      # nearest multiple...
+        if rw * rh > MAX_PIXELS or max(rw, rh) > longest:            # ...unless that goes past a limit:
+            rw, rh = w // a * a, h // a * a                          # then round down instead
+        w, h = rw, rh
         if not (256 <= w <= longest and 256 <= h <= longest):
             return None, f"Each side must be between 256 and {longest}."
         if w * h > MAX_PIXELS:
