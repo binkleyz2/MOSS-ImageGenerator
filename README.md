@@ -22,6 +22,17 @@ MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/
 
   \*Qwen edits normal pictures well, in about 50 s at 1 MP. Very dark pictures can come out over-brightened, so use MOSS or FLUX for those.
 - **Edit a picture by instruction.** Choose **Edit a picture**, pick any PNG or JPEG, and describe the change, e.g. *"Change only the orange cat to a black cat. Keep everything else unchanged."* The rest of the picture stays as it was.
+- **Set as wallpaper.** Put a picture on your desktop: one slice per monitor, spanned across all of them, the same picture everywhere, or one screen only. **Put my previous wallpaper back** undoes it.
+- **Wallpaper of the day.** Optionally makes a fresh wallpaper every morning from your prompts, varied by the prompt enhancer, and sets it. It's off until you turn it on.
+- **AI upscaling.** Real-ESRGAN makes screen panoramas sharp instead of soft when they're enlarged to full resolution. **Upscale** also makes a 2x or 4x copy of any picture.
+- **Gallery.** Browse everything you've made, search by prompt, filter by model. Right-click a picture to reuse its settings, edit it, describe it or open it.
+- **Improve a prompt.** Turns a short idea into a detailed prompt, locally (Qwen 3.5) or with Gemini.
+- **Queue, variations and compare.** Queue several pictures to run one after another, make 4 variations with different seeds, or **compare models** with the same prompt side by side.
+- **Paint to edit.** In Edit mode, paint over just the area to change and describe what goes there; the rest stays untouched.
+- **Advanced settings** per model: steps, guidance, sampler, a negative prompt, kept line breaks (to control text layout), and **style LoRAs**.
+- **Layout boxes (MOSS).** Draw boxes to place things and text exactly where you want them, using MOSS-Image's own layout format.
+- **Low-memory warning** before a big job if Windows is short on memory, instead of failing partway.
+- **Phone access.** Make pictures from your phone's browser over your home network or WireGuard. It's password-protected and off until you turn it on.
 - **Write a prompt from any picture.** Pick a photo or an AI picture and the app writes a detailed prompt that recreates it, in a form all four models understand. Any readable text is copied in quotes.
   - It runs locally by default (free, private) with [llama.cpp](https://github.com/ggml-org/llama.cpp) and the Qwen vision files you already have; about 5-10 seconds.
   - Or use Google Gemini 3.5 Flash-Lite with your API key, about $0.001 per picture.
@@ -95,7 +106,8 @@ Same seed, one word changed (*orange cat* to *black cat*):
 4. **Optional: add more models.** Run `download-models.ps1` and pick any of:
    - the editing add-on for MOSS (1.4 GB);
    - FLUX.2 Klein (8.6 GB);
-   - Qwen Image 2.1 (14 GB).
+   - Qwen Image 2.1 (14 GB);
+   - the AI upscaler, Real-ESRGAN (67 MB).
 
    Each download is checked against Hugging Face's published size and checksum.
 
@@ -119,14 +131,42 @@ If the app opens with a message that the engine or models weren't found, it's in
 4. Click **Make picture** (or press Ctrl+Enter). The estimate under the size shows how long the chosen model should take.
 5. The picture appears on the right with its details. **Open picture** and **Show in folder** are below it.
 
-**To start from an existing picture**, click **From a picture...** under the prompt, or **Write a prompt from this** under the picture shown:
+**To start from an existing picture**, click **Start from ▾ > Write a prompt from a picture...** under the prompt, or **Write a prompt from this** under the picture shown:
 1. Choose the picture and the describer: Qwen on this PC, or Gemini in the cloud.
 2. Pick **Detailed** or **Short**.
 3. Click **Write prompt**. Edit the result if you like, then click **Use as prompt**.
 
 The first time, the local describer offers to download llama.cpp (about 360 MB) from its official releases. It reuses the Qwen 3.5 vision files from the MOSS editing add-on, or Qwen Image's Qwen3-VL files.
 
-**To check for updates**, click **Check for updates...** at the bottom right. The first check reads every model file once (about half a minute); later checks take a second. Tick what to install, then click **Install selected**.
+**To improve a short prompt**, click **Improve** under the prompt box. Check the result, then click **Use**.
+
+**To make several pictures:** **Queue ▾** next to Make picture has these options:
+- **Add to the queue:** queue the current settings to run later.
+- **Make 4 variations:** the same prompt with four different seeds.
+- **Compare models:** the same prompt with each model you tick, shown side by side.
+
+**More ▾ > Queue** shows what's waiting and what's done.
+
+**For wallpapers**, choose one of your screens (or **Screens: all**) as the Shape, then make the picture. Click **Set as wallpaper ▾** and choose **One per screen** for the sharpest result. To get a new one every day, use **More ▾ > Wallpaper of the day**.
+
+**To change only part of a picture**, choose **Edit a picture**, then **Paint area...**. Paint over the part to change (right-click erases), click **Use this area**, describe what should be there, and click **Edit picture**.
+
+**To place things exactly (MOSS)**, open **Start from ▾ > Layout boxes**:
+1. Drag boxes on the canvas.
+2. Describe each box. Text boxes also get the exact words to write.
+3. Describe the whole picture, then click **Use layout as prompt**.
+
+Keep the same picture size when you make it.
+
+**Advanced settings** are under **More ▾ > Advanced settings**:
+- steps, guidance, sampler, negative prompt and line breaks;
+- a **style LoRA** with its strength.
+
+Put LoRA `.safetensors` files in `models\loras\styles`, and only use a LoRA with the model it was made for.
+
+**To use it from your phone**, open **More ▾ > Phone access**, set a password and turn it on. Open the address it shows in your phone's browser, on the same network or over your WireGuard tunnel. The app must be running on your PC. If Windows asks whether to allow network access, allow it for private networks.
+
+**To check for updates**, click **More ▾ > Check for updates...**. The first check reads every model file once (about half a minute); later checks take a second. Tick what to install, then click **Install selected**.
 
 **To change one detail**, there are two ways:
 
@@ -183,6 +223,14 @@ It makes one small picture through the app and writes `selftest-result.json`.
 - **Nano Banana says the key wasn't accepted (401), isn't allowed (403) or is out of quota (429).** Check the key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and that billing is turned on. Google has no free tier for image output.
 - **Nano Banana returned no picture.** Google's content rules blocked the prompt. The app shows any reason Google gave.
 - **"Write prompt" says the local describer isn't available.** Choose its *get the local describer* option to download llama.cpp. You also need the MOSS editing add-on or Qwen Image 2.1 from `download-models.ps1`, since those include the vision files it uses.
+- **My wallpaper changed and I want the old one back.** Choose **More ▾ > Put my previous wallpaper back**, or the same item under **Set as wallpaper ▾**.
+- **The phone can't reach the app.** Check these:
+  - phone access is on, set to *my network or WireGuard*;
+  - the phone is on the same network or connected through WireGuard;
+  - Windows Firewall allows the app on private networks.
+
+  The page uses plain HTTP, so only use it on networks you trust or through the tunnel.
+- **A style LoRA does nothing or makes a mess.** It was probably made for a different model. Use it only with the model it was made for.
 - **An engine update failed its test.** The app puts the previous version back automatically and says so. Nothing else is needed; try again after the next release.
 - **A Qwen edit looks over-brightened or harsh.** This happens with very dark pictures. Use MOSS or FLUX for those.
 
@@ -195,6 +243,9 @@ It makes one small picture through the app and writes `selftest-result.json`.
 | `moss-image-pc/tools/moss_gui.py` | MOSS Image Studio |
 | `moss-image-pc/tools/moss_describe.py` | Write a prompt from a picture: local (llama.cpp + Qwen vision) or Gemini |
 | `moss-image-pc/tools/moss_updates.py` | Checks and installs model and engine updates, verified, with undo |
+| `moss-image-pc/tools/moss_extras.py` | Gallery, queue and compare, enhancer, upscaling, wallpaper of the day, paint-to-edit, layout boxes, advanced settings, phone access window |
+| `moss-image-pc/tools/moss_wallpaper.py` | Sets Windows wallpapers per monitor or spanned (IDesktopWallpaper), with undo |
+| `moss-image-pc/tools/moss_remote.py` | The password-protected phone web page |
 | `moss-image-pc/tools/moss_cloud.py` | Nano Banana: Google Gemini API requests and the encrypted API key |
 | `moss-image-pc/tools/moss_meta.py` | Reads and writes picture details (EXIF / XMP / PNG text) |
 | `moss-image-pc/tools/prompt_info.py` | Token counter and prompt `.txt` writer used by the launcher |
@@ -241,7 +292,8 @@ The optional models belong to their makers:
 This project also relies on:
 
 - [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) by leejet and contributors (MIT): the engine that runs the models
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) by ggml-org and contributors (MIT): runs the local picture describer, with Qwen 3.5 or Qwen3-VL vision models
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) by ggml-org and contributors (MIT): runs the local picture describer and prompt enhancer, with Qwen 3.5 or Qwen3-VL
+- [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) by Xintao Wang et al. (BSD-3-Clause): the AI upscaler (x4plus model)
 - [Qwen3.5-9B](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) (GGUF build by unsloth): the text encoder
 - FLUX.2 VAE: the image decoder
 - Python, Tk, [Pillow](https://python-pillow.org) and Hugging Face [tokenizers](https://github.com/huggingface/tokenizers), bundled in the `.exe`

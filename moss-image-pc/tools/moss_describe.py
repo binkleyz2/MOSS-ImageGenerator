@@ -110,3 +110,64 @@ def describe_cloud(api_key, picture, style="Detailed", timeout=120):
     if not text:
         raise C.CloudError("Google returned no description. " + json.dumps(data)[:300])
     return text
+
+
+# ---------------- prompt enhancer (text only) ----------------
+
+ENHANCE_SYSTEM = (
+    "You expand short picture ideas into one detailed text-to-image prompt. Keep everything the user asked for "
+    "and invent sensible specifics: subject details, setting, composition and camera angle, lighting, colors, mood, "
+    "and the style or medium. Put any words that must appear in the picture in double quotes. "
+    "Write one flowing paragraph of {length}. Output only the prompt, with no introduction or explanation."
+)
+ENHANCE_LENGTH = {"Detailed": "80 to 150 words", "Short": "30 to 60 words"}
+
+
+def enhance_options(root):
+    """Local text models for the enhancer: list of (label, model path)."""
+    if not (root / "llm-bin" / "llama-cli.exe").exists():
+        return []
+    models = root / "models"
+    candidates = [("Qwen 3.5 on this PC", models / "Qwen3.5-9B-Q4_K_M.gguf"),
+                  ("Qwen3-VL on this PC", models / "qwen-image-2.1" / "Qwen3VL-8B-Instruct-Q4_K_M.gguf")]
+    return [(label, m) for label, m in candidates if m.exists()]
+
+
+def _reply_from_cli(stdout):
+    """llama-cli prints a banner, then '> <prompt>', the reply, and '[ Prompt: ... ]'. Keep only the reply."""
+    lines = stdout.replace("\r", "").split("\n")
+    start = max((i for i, line in enumerate(lines) if line.startswith("> ")), default=-1)
+    reply = []
+    for line in lines[start + 1:]:
+        if line.startswith("[ Prompt:") or line.strip() == "Exiting...":
+            break
+        reply.append(line)
+    return clean("\n".join(reply))
+
+
+def enhance_local(root, model, idea, style="Detailed", timeout=300):
+    cmd = [str(root / "llm-bin" / "llama-cli.exe"), "-m", str(model),
+           "-sys", ENHANCE_SYSTEM.format(length=ENHANCE_LENGTH.get(style, ENHANCE_LENGTH["Detailed"])),
+           "-p", idea, "-st", "-rea", "off", "-ngl", "99", "--temp", "0.7", "-n", "800", "-c", "4096",
+           "--no-warmup", "--log-disable"]
+    try:
+        run = subprocess.run(cmd, capture_output=True, timeout=timeout, cwd=str(root), stdin=subprocess.DEVNULL,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("The local enhancer took too long.") from None
+    text = _reply_from_cli(run.stdout.decode("utf-8", "replace"))
+    if run.returncode != 0 or not text:
+        raise RuntimeError("The local enhancer didn't produce a prompt.")
+    return text
+
+
+def enhance_cloud(api_key, idea, style="Detailed", timeout=120):
+    system = ENHANCE_SYSTEM.format(length=ENHANCE_LENGTH.get(style, ENHANCE_LENGTH["Detailed"]))
+    body = {"model": CLOUD_MODEL, "input": [{"type": "text", "text": f"{system}\n\nPicture idea: {idea}"}],
+            "generation_config": {"thinking_level": "minimal"}}
+    data = C.post(api_key, body, timeout=timeout)
+    _, texts = C.extract(data)
+    text = clean(" ".join(texts)) if texts else ""
+    if not text:
+        raise C.CloudError("Google returned no prompt.")
+    return text

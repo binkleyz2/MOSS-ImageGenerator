@@ -23,6 +23,12 @@ $catalog = [ordered]@{
             @('flux2-klein-4b\flux-2-klein-4b-Q8_0.gguf', "$HF/leejet/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q8_0.gguf"),
             @('flux2-klein-4b\Qwen3-4B-Q8_0.gguf',        "$HF/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q8_0.gguf"))
     }
+    'upscaler' = @{
+        Name = 'AI upscaler (Real-ESRGAN x4plus, for sharper big pictures)'; Size = '67 MB'; License = 'BSD-3-Clause'
+        Files = @(,
+            # GitHub has no checksum header, so the exact size is given here. (Leading comma: a one-file list.)
+            @('upscalers\RealESRGAN_x4plus.pth', 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth', 67040989))
+    }
     'qwen' = @{
         Name = 'Qwen Image 2.1 (text in pictures, also edits)'; Size = '14.1 GB'; License = 'Qwen Research (non-commercial)'
         Files = @(
@@ -61,7 +67,7 @@ foreach ($p in $Packs) {
         New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
         # Hugging Face reports each file's exact size and SHA-256 in its X-Linked-* headers.
         $headers = (& curl.exe -sI $f[1]) -join "`n"
-        $size = if ($headers -match '(?im)^x-linked-size:\s*(\d+)') { [int64]$Matches[1] } else { -1 }
+        $size = if ($f.Count -gt 2) { [int64]$f[2] } elseif ($headers -match '(?im)^x-linked-size:\s*(\d+)') { [int64]$Matches[1] } else { -1 }
         $sha  = if ($headers -match '(?im)^x-linked-etag:\s*"?([0-9a-f]{64})"?') { $Matches[1] } else { '' }
         if ((Test-Path $dest) -and (Get-Item $dest).Length -eq $size) { Write-Host "  already have $($f[0])" -ForegroundColor Green; continue }
         Write-Host "  downloading $($f[0]) ..."

@@ -28,8 +28,9 @@ import moss_cloud as C
 import moss_describe as D
 import moss_meta as M
 import moss_updates as U
+import moss_extras as X
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -51,6 +52,7 @@ SD_CLI = ROOT / "bin" / "sd-cli.exe"
 MODELS = ROOT / "models"
 TOKENIZER = MODELS / "tokenizer_qwen3.5.json"   # used for token counts (exact for MOSS, close for the others)
 SETTINGS_FILE = HERE / "gui_settings.json"
+UPSCALER = MODELS / "upscalers" / "RealESRGAN_x4plus.pth"     # Real-ESRGAN x4plus (general photos)
 DEFAULT_OUT = ROOT / "outputs"
 
 MAX_PIXELS = 3440 * 1440          # largest picture made here (about 5 MP)
@@ -326,14 +328,57 @@ def write_txt(final, job):
         pass
 
 
+def ai_upscale(src, dest):
+    """4x Real-ESRGAN upscale with the image engine. Raises RuntimeError on failure."""
+    cmd = [str(SD_CLI), "-M", "upscale", "--upscale-model", str(UPSCALER), "-i", str(src), "-o", str(dest)]
+    run = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, timeout=1800,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if run.returncode != 0 or not Path(dest).exists():
+        tail = run.stdout.decode("utf-8", "replace").strip().splitlines()[-3:]
+        raise RuntimeError("AI upscaling failed: " + " ".join(tail))
+
+
+def upscale_picture(src, factor, say):
+    """Make a new, factor-times-bigger copy of a picture with AI upscaling. Returns the new file."""
+    src = Path(src)
+    out = src.with_name(f"{src.stem}_x{factor}{src.suffix}")
+    tmp = src.with_name(f"{src.stem}.x4.tmp.png")
+    say(f"AI upscaling {src.name} (this can take a minute for big pictures)...")
+    ai_upscale(src, tmp)
+    with Image.open(src) as im:
+        target = (im.width * factor, im.height * factor)
+    if factor != 4:
+        with Image.open(tmp) as im:
+            im.convert("RGB").resize(target, Image.Resampling.LANCZOS).save(tmp, "PNG", compress_level=1)
+    meta = M.read(src)
+    meta["settings"] = (meta.get("settings", "") + f"; upscaled {factor}x to {target[0]}x{target[1]} "
+                        "with Real-ESRGAN").lstrip("; ")
+    meta["title"] = (meta.get("title") or src.stem) + f" ({factor}x)"
+    say("Saving...")
+    M.write(out, meta, source=tmp)
+    tmp.unlink(missing_ok=True)
+    return out
+
+
 def finish_files(job, say):
     """After the engine is done: scale up for screens, save with details, split per screen. Returns files."""
     raw, final, scr = job["raw"], job["final"], job.get("screen")
     if scr and job["upscale"] and (scr["W"], scr["H"]) != (job["w"], job["h"]):
-        say(f"Scaling up to {scr['W']} x {scr['H']}...")
-        with Image.open(raw) as im:
+        source = raw
+        if job.get("ai_upscale") and UPSCALER.exists() and scr["W"] > job["w"] * 1.05:
+            say(f"Sharpening with AI upscaling, then fitting to {scr['W']} x {scr['H']}...")
+            source = raw.with_name(raw.stem + ".x4.png")
+            try:
+                ai_upscale(raw, source)
+            except Exception:
+                source = raw                        # fall back to ordinary scaling
+        else:
+            say(f"Scaling up to {scr['W']} x {scr['H']}...")
+        with Image.open(source) as im:
             big = im.convert("RGB").resize((scr["W"], scr["H"]), Image.Resampling.LANCZOS)
         big.save(raw, "PNG", compress_level=1)
+        if source != raw:
+            Path(source).unlink(missing_ok=True)
     say("Saving the picture and its details...")
     M.write(final, job["meta"], source=raw)
     files = [final]
@@ -382,6 +427,11 @@ class Studio:
         self.model_key = key if key in PROFILES else DEFAULT_PROFILE
         self.mode = tk.StringVar(value="new")
         self.edit_src = None           # picture to edit (Edit mode)
+        self.edit_mask = None          # painted area for inpainting (Edit mode)
+        self.queue = []                # requests waiting to run
+        self.queue_running = False
+        self.queue_done = []           # (request, file or None, error or None), newest last
+        self.groups = {}               # compare/variation groups: id -> dict(total, results)
         self.spins = []
 
         root.title("MOSS Image Studio")
@@ -407,6 +457,14 @@ class Studio:
         self.root.after(100, self.poll_events)
         if check:
             self.root.after(400, self.check_install)
+            self.root.after(800, self.autostart_remote)
+
+    def autostart_remote(self):
+        if self.settings.get("remote", {}).get("enabled"):
+            try:
+                X.start_remote(self)
+            except OSError as e:
+                self.status.configure(text=f"Phone access couldn't start: {e}")
 
     # ---------------- install check ----------------
     @property
@@ -559,9 +617,10 @@ class Studio:
         self.edit_row = ttk.Frame(box)
         self.edit_row.grid(row=2, column=0, columnspan=4, sticky="we", pady=(6, 0))
         ttk.Label(self.edit_row, text="Picture to edit:").pack(side="left")
-        self.edit_label = ttk.Label(self.edit_row, text="none chosen", style="Hint.TLabel", width=26)
+        self.edit_label = ttk.Label(self.edit_row, text="none chosen", style="Hint.TLabel", width=20)
         self.edit_label.pack(side="left", padx=6)
-        ttk.Button(self.edit_row, text="Choose...", command=self.choose_edit_src).pack(side="right")
+        ttk.Button(self.edit_row, text="Paint area...", command=lambda: X.open_mask_painter(self)).pack(side="right")
+        ttk.Button(self.edit_row, text="Choose...", command=self.choose_edit_src).pack(side="right", padx=(0, 4))
         ttk.Button(self.edit_row, text="Use the picture shown", command=self.use_shown_as_src
                    ).pack(side="right", padx=4)
         self.edit_row.grid_remove()
@@ -579,9 +638,10 @@ class Studio:
                    ).grid(row=4, column=1, sticky="e", pady=(6, 0), padx=4)
         row4 = ttk.Frame(box)
         row4.grid(row=4, column=2, columnspan=2, sticky="e", pady=(6, 0))
-        ttk.Button(row4, text="Earlier picture...", command=self.reuse_from_file).pack(side="left")
-        ttk.Button(row4, text="From a picture...", command=lambda: self.open_describe(None)
-                   ).pack(side="left", padx=(4, 0))
+        ttk.Button(row4, text="Improve", command=lambda: X.open_enhance(self)).pack(side="left")
+        start_btn = ttk.Button(row4, text="Start from \u25be")
+        start_btn.configure(command=lambda: X.start_from_menu(self, start_btn))
+        start_btn.pack(side="left", padx=(4, 0))
         self.prompt.bind("<<Modified>>", self.on_prompt_change)
 
         # Size
@@ -613,13 +673,19 @@ class Studio:
             sp.bind("<KeyRelease>", lambda e: self.on_manual_size())
         self.size_label = ttk.Label(size, text="", style="Hint.TLabel", wraplength=430)
         self.size_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.adv_note = ttk.Label(size, text="", style="Hint.TLabel", wraplength=430)
+        self.adv_note.grid(row=6, column=0, columnspan=4, sticky="w")
 
         self.screen_box = ttk.Frame(size)
         self.screen_box.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.upscale = tk.BooleanVar(value=True)
         self.split = tk.BooleanVar(value=True)
         ttk.Checkbutton(self.screen_box, text="Scale up to the screens' full resolution", variable=self.upscale,
-                        command=self.update_size_label).pack(anchor="w")
+                        command=self.on_upscale_toggle).pack(anchor="w")
+        self.ai_upscale = tk.BooleanVar(value=True)
+        self.ai_check = ttk.Checkbutton(self.screen_box, text="Use AI upscaling for a sharper result (Real-ESRGAN)",
+                                        variable=self.ai_upscale)
+        self.ai_check.pack(anchor="w")
         self.split_check = ttk.Checkbutton(self.screen_box, text="Also save each screen's part as its own picture",
                                            variable=self.split)
         self.split_check.pack(anchor="w")
@@ -687,6 +753,9 @@ class Studio:
         self.go_btn.pack(side="left")
         self.cancel_btn = ttk.Button(go, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_btn.pack(side="left", padx=8)
+        queue_btn = ttk.Button(go, text="Queue \u25be")
+        queue_btn.configure(command=lambda: X.queue_menu(self, queue_btn))
+        queue_btn.pack(side="left")
         self.status = ttk.Label(go, text="Ready.", style="Status.TLabel")
         self.status.pack(side="left", padx=8)
         self.progress = ttk.Progressbar(left, mode="determinate", maximum=100)
@@ -707,16 +776,24 @@ class Studio:
         self.file_label.pack(fill="x", pady=(6, 0))
         btns = ttk.Frame(pv)
         btns.pack(fill="x", pady=(6, 0))
+        wall_btn = ttk.Button(btns, text="Set as wallpaper \u25be")
+        wall_btn.configure(command=lambda: X.wallpaper_menu(self, wall_btn))
+        up_btn = ttk.Button(btns, text="Upscale \u25be")
+        up_btn.configure(command=lambda: X.upscale_menu(self, up_btn))
         self.pic_buttons = [
-            ttk.Button(btns, text="Open picture", command=lambda: self.open_path(self.current)),
+            ttk.Button(btns, text="Open", command=lambda: self.open_path(self.current)),
             ttk.Button(btns, text="Show in folder", command=self.show_in_folder),
-            ttk.Button(btns, text="Make a variation (same seed)", command=self.variation),
-            ttk.Button(btns, text="Write a prompt from this", command=lambda: self.open_describe(self.current)),
+            ttk.Button(btns, text="Variation (same seed)", command=self.variation),
+            ttk.Button(btns, text="Prompt from this", command=lambda: self.open_describe(self.current)),
+            wall_btn, up_btn,
         ]
         for b in self.pic_buttons:
             b.pack(side="left", padx=(0, 6))
             b.state(["disabled"])
-        ttk.Button(btns, text="Open another picture...", command=self.open_other).pack(side="right")
+        btns2 = ttk.Frame(pv)
+        btns2.pack(fill="x", pady=(6, 0))
+        ttk.Button(btns2, text="Gallery...", command=lambda: X.open_gallery(self)).pack(side="left")
+        ttk.Button(btns2, text="Open another picture...", command=self.open_other).pack(side="left", padx=6)
 
         ed = ttk.LabelFrame(right, text=" Details stored in this picture (EXIF / XMP) ", padding=8)
         ed.pack(fill="x", pady=(8, 0))
@@ -754,7 +831,9 @@ class Studio:
         cb.bind("<<ComboboxSelected>>", lambda e: (self.apply_theme(), self.save_settings()))
         self.combos.append(cb)
         ttk.Label(lg, text="Theme").pack(side="right", padx=(0, 6))
-        ttk.Button(lg, text="Check for updates...", command=self.open_updates).pack(side="right", padx=(0, 16))
+        more_btn = ttk.Button(lg, text="More \u25be")
+        more_btn.configure(command=lambda: X.more_menu(self, more_btn))
+        more_btn.pack(side="right", padx=(0, 16))
         self.log = self.make_text(right, height=8, wrap="none", font=("Consolas", 8), state="disabled")
 
     # ---------------- theme ----------------
@@ -864,6 +943,28 @@ class Studio:
         self.on_seed_mode()
 
     # ---------------- model and mode ----------------
+    def on_upscale_toggle(self):
+        self.ai_check.state(["!disabled"] if UPSCALER.exists() and self.upscale.get() else ["disabled"])
+        self.update_size_label()
+
+    def refresh_advanced_note(self):
+        p, a = self.profile, self.advanced_for()
+        if p.get("cloud"):
+            self.adv_note.configure(text="")
+            return
+        bits = []
+        if a["steps"] != p["steps"] or a["cfg"] != p["cfg"]:
+            bits.append(f"{a['steps']} steps, guidance {a['cfg']}")
+        if a["sampler"] and a["sampler"] != (p["sampler"] or ""):
+            bits.append(f"sampler {a['sampler']}")
+        if a["negative"]:
+            bits.append("negative prompt")
+        if a["keep_breaks"]:
+            bits.append("line breaks kept")
+        if a["lora"]:
+            bits.append(f"style {Path(a['lora']).stem} {a['lora_weight']}")
+        self.adv_note.configure(text=("Advanced: " + ", ".join(bits) + "  (More > Advanced settings)") if bits else "")
+
     def refresh_model_list(self):
         self.model_box.configure(values=[self.model_label(k) for k in PROFILES])
         self.model_var.set(self.model_label(self.model_key))
@@ -879,6 +980,8 @@ class Studio:
         self.model_note.configure(text=f"{p['note']}  License: {p['license']}.")
         for sp in self.spins:
             sp.configure(increment=p["align"])
+        if hasattr(self, "adv_note"):
+            self.refresh_advanced_note()
 
     def on_model_change(self):
         labels = [self.model_label(k) for k in PROFILES]
@@ -912,7 +1015,8 @@ class Studio:
         if self.mode.get() == "edit" and not self.can_edit():
             self.mode.set("new")
         editing = self.mode.get() == "edit"
-        self.prompt_box.configure(text=" What should change? " if editing else " What do you want to see? ")
+        self.prompt_box.configure(text=(" What goes in the painted area? " if self.edit_mask else
+                                        " What should change? ") if editing else " What do you want to see? ")
         self.go_btn.configure(text="Edit picture" if editing else "Make picture")
         if editing:
             self.edit_row.grid()
@@ -937,9 +1041,10 @@ class Studio:
         except Exception as e:
             messagebox.showerror("Edit a picture", f"Can't open that picture:\n{e}")
             return
+        if self.edit_src != Path(path):
+            self.edit_mask = None
         self.edit_src = Path(path)
-        name = self.edit_src.name
-        self.edit_label.configure(text=name if len(name) <= 34 else name[:31] + "...")
+        self.edit_label_refresh()
         align = self.profile["align"]
         if sw * sh <= MAX_PIXELS and sw % align == 0 and sh % align == 0 and max(sw, sh) <= MAX_SIDE:
             w, h = sw, sh
@@ -948,6 +1053,16 @@ class Studio:
         self.width.set(w)
         self.height.set(h)
         self.update_size_label()
+
+    def edit_label_refresh(self):
+        name = self.edit_src.name if self.edit_src else "none chosen"
+        name = name if len(name) <= 26 else name[:23] + "..."
+        if self.edit_mask:
+            name += "  + painted area"
+        self.edit_label.configure(text=name)
+        if self.mode.get() == "edit":
+            self.prompt_box.configure(text=" What goes in the painted area? " if self.edit_mask
+                                      else " What should change? ")
 
     def choose_edit_src(self):
         path = filedialog.askopenfilename(
@@ -1046,6 +1161,7 @@ class Studio:
         if scr:
             self.screen_box.grid()
             self.split_check.state(["!disabled"] if len(scr["parts"]) > 1 else ["disabled"])
+            self.ai_check.state(["!disabled"] if UPSCALER.exists() and self.upscale.get() else ["disabled"])
         else:
             self.screen_box.grid_remove()
         self.update_size_label()
@@ -1211,89 +1327,179 @@ class Studio:
 
     # ---------------- making a picture ----------------
     def start(self):
+        """Make picture: build a request from the window and run it now."""
         if self.job:
             return
         if getattr(self, "updating", False):
             messagebox.showinfo("MOSS Image Studio", "An update is being installed. Try again when it's done.")
             return
+        spec = self.collect_spec()
+        if spec:
+            self.launch(spec, interactive=True)
+
+    # ---------------- requests ----------------
+    def advanced_for(self, key=None):
+        """Advanced settings for a model, with the model's defaults filled in."""
+        key = key or self.model_key
+        p = PROFILES[key]
+        saved = self.settings.get("advanced", {}).get(key, {})
+        return dict(steps=saved.get("steps") or p["steps"], cfg=saved.get("cfg") or p["cfg"],
+                    negative=saved.get("negative", ""), sampler=saved.get("sampler") or p["sampler"] or "",
+                    keep_breaks=saved.get("keep_breaks", False), lora=saved.get("lora", ""),
+                    lora_weight=saved.get("lora_weight", 0.8))
+
+    def collect_spec(self, quiet=False):
+        """Everything about one picture, read from the window and checked. None if something is missing."""
+        def problem(title, text):
+            if not quiet:
+                messagebox.showinfo(title, text)
+            return None
         editing = self.mode.get() == "edit"
-        if editing and not self.can_edit():
-            return
-        if not self.check_install(edit=editing):
-            return
-        prompt = tidy_prompt(self.prompt.get("1.0", "end"))
+        mask = self.edit_mask if (editing and self.edit_mask and Path(self.edit_mask).exists()) else None
+        if editing and not mask and not self.can_edit(warn=not quiet):
+            return None
+        if mask and self.profile.get("cloud"):
+            return problem("Paint an area", "Nano Banana can't use a painted area. Clear the painted area, or "
+                                            "choose a model on this PC.")
+        if not quiet and not self.check_install(edit=editing and not mask):
+            return None
+        adv = self.advanced_for()
+        raw_prompt = self.prompt.get("1.0", "end").strip()
+        prompt = raw_prompt if adv["keep_breaks"] else tidy_prompt(raw_prompt)
         if not prompt:
-            messagebox.showinfo("MOSS Image Studio", "Describe what should change first." if editing
-                                else "Type what you want to see first.")
-            return
+            return problem("MOSS Image Studio", "Describe what should change first." if editing
+                           else "Type what you want to see first.")
         if editing and (not self.edit_src or not self.edit_src.exists()):
-            messagebox.showinfo("Edit a picture", "Choose the picture to edit first.")
-            return
+            return problem("Edit a picture", "Choose the picture to edit first.")
         size, err = self.checked_size()
         if err:
-            messagebox.showwarning("Picture size", err)
-            return
+            return problem("Picture size", err)
         seed, err = self.chosen_seed()
         if err:
-            messagebox.showwarning("Seed", err)
-            return
+            return problem("Seed", err)
+        if self.seed_mode.get() == "random" and not self.profile.get("cloud"):
+            seed = "random"                    # chosen when it runs, so queued copies differ
         out_dir = Path(self.out_dir.get().strip() or DEFAULT_OUT)
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            messagebox.showerror("Save to", f"Can't use that folder:\n{e}")
-            return
-        w, h = size
-        profile = self.profile
-        if profile.get("cloud"):
-            self.start_cloud(prompt, w, h, editing, out_dir)
-            return
         scr = None if editing else self.screen_choice()
-        steps, cfg = (profile["edit"]["steps"], profile["edit"]["cfg"]) if editing else (profile["steps"], profile["cfg"])
+        return dict(model=self.model_key, editing=editing, mask=str(mask) if mask else None,
+                    prompt=prompt, w=size[0], h=size[1], seed=seed,
+                    edit_src=str(self.edit_src) if editing else None, out_dir=str(out_dir),
+                    fmt=self.fmt.get(), save_txt=self.save_txt.get(), authors=self.authors.get().strip(),
+                    copyright=self.copyright.get().strip(), tags=M.split_tags(self.tags.get()),
+                    screen=scr, shape=self.aspect.get(), tier=self.tier.get(),
+                    upscale=bool(scr) and self.upscale.get(), split=bool(scr) and self.split.get(),
+                    ai_upscale=bool(scr) and self.upscale.get() and self.ai_upscale.get() and UPSCALER.exists(),
+                    adv=adv, label="")
+
+    def memory_ok(self, spec):
+        """Warn before a big job if Windows can't promise enough memory (see memory_advice)."""
+        profile = PROFILES[spec["model"]]
+        if profile.get("cloud"):
+            return True
+        files_gb = sum(p.stat().st_size for p in profile_files(profile, spec["editing"]) if p.exists()) / 2**30
+        need = files_gb * 1.1 + 3 * spec["w"] * spec["h"] / 1e6 + 1
+        ram, commit = memory_free_gb()
+        if commit is None or commit >= need:
+            return True
+        return messagebox.askyesno(
+            "Low memory", f"Windows can only promise programs {commit:.0f} GB more memory right now, and "
+            f"{profile['name']} at {spec['w']} x {spec['h']} usually needs about {need:.0f} GB, so it may fail.\n\n"
+            "Restarting Windows usually fixes this if it has been running for days. "
+            "A smaller size or FLUX needs less.\n\nTry anyway?")
+
+    def launch(self, spec, interactive=True):
+        """Run one request. Returns True if it started."""
+        profile = PROFILES[spec["model"]]
+        if interactive and not self.memory_ok(spec):
+            return False
+        try:
+            Path(spec["out_dir"]).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return self.launch_failed(spec, f"Can't use the output folder: {e}", interactive)
+        if profile.get("cloud"):
+            return self.launch_cloud(spec, interactive)
+        if not SD_CLI.exists() or any(not p.exists() for p in profile_files(profile, spec["editing"] and not spec["mask"])):
+            return self.launch_failed(spec, f"{profile['name']}'s files aren't all downloaded.", interactive)
+        editing, mask = spec["editing"], spec["mask"]
+        adv, w, h = spec["adv"], spec["w"], spec["h"]
+        seed = random.randint(0, 2**30 - 1) if spec["seed"] == "random" else int(spec["seed"])
+        scr = spec["screen"]
+        use_edit = editing and not mask                  # instruction edit (reference picture)
+        if use_edit:
+            steps, cfg = profile["edit"]["steps"], profile["edit"]["cfg"]
+        else:
+            steps, cfg = adv["steps"], adv["cfg"]
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         tail = ""
         if scr:
             tail = f"_{'screens' if len(scr['parts']) > 1 else 'screen'}{scr['W']}x{scr['H']}"
         if editing:
-            tail = "_edit"
-        final = out_dir / f"{profile['prefix']}_{stamp}_{w}x{h}_seed{seed}{tail}.{self.fmt.get()}"
+            tail = "_inpaint" if mask else "_edit"
+        final = Path(spec["out_dir"]) / f"{profile['prefix']}_{stamp}_{w}x{h}_seed{seed}{tail}.{spec['fmt']}"
+        prompt = spec["prompt"]
         tokens = self.count_tokens(prompt)
         when = datetime.now()
         settings = (f"{w}x{h}, seed {seed}, steps {steps}, cfg {cfg}, "
                     f"tokens {tokens if tokens is not None else 'unknown'}, model {profile['name']}")
+        if adv["negative"] and not use_edit:
+            settings += f", negative: {adv['negative']}"
+        if adv["lora"]:
+            settings += f", style LoRA {adv['lora']} at {adv['lora_weight']}"
         if scr:
             names = " + ".join(f"{p['name']} {p['w']}x{p['h']}" for p in scr["parts"])
-            settings += f", for screens: {names}" + (f", scaled up to {scr['W']}x{scr['H']}" if self.upscale.get() else "")
+            settings += f", for screens: {names}" + (f", scaled up to {scr['W']}x{scr['H']}" if spec["upscale"] else "")
+            if spec["ai_upscale"]:
+                settings += " with AI upscaling"
+        src_name = Path(spec["edit_src"]).name if editing else None
         if editing:
-            settings += f", edit of {self.edit_src.name}"
+            settings += f", {'inpaint (painted area)' if mask else 'edit'} of {src_name}"
         meta = dict(title=("Edit: " if editing else "") + auto_title(prompt),
-                    subject=f"Edited from {self.edit_src.name}" if editing else "", comment=prompt,
-                    authors=self.authors.get().strip(), copyright=self.copyright.get().strip(),
-                    tags=M.split_tags(self.tags.get()), software=SOFTWARE,
+                    subject=f"Edited from {src_name}" if editing else "", comment=prompt,
+                    authors=spec["authors"], copyright=spec["copyright"], tags=spec["tags"], software=SOFTWARE,
                     date_taken=when.strftime("%Y:%m:%d %H:%M:%S"), settings=settings)
         job = dict(prompt=prompt, w=w, h=h, seed=seed, final=final, raw=final.with_name(final.stem + ".engine.png"),
-                   tokens=tokens, save_txt=self.save_txt.get(), when=when, meta=meta, profile=profile,
-                   steps=steps, cfg=cfg, edit_src=self.edit_src.name if editing else None,
-                   screen=scr, shape=self.aspect.get(), tier=self.tier.get(), model=self.model_key,
-                   upscale=bool(scr) and self.upscale.get(), split=bool(scr) and self.split.get(), cancelled=False)
+                   tokens=tokens, save_txt=spec["save_txt"], when=when, meta=meta, profile=profile,
+                   steps=steps, cfg=cfg, edit_src=src_name, screen=scr, shape=spec["shape"], tier=spec["tier"],
+                   model=spec["model"], upscale=spec["upscale"], split=spec["split"], ai_upscale=spec["ai_upscale"],
+                   cancelled=False, spec=spec)
         cmd = [str(SD_CLI)]
         files = dict(profile["files"])
-        if editing:
+        if use_edit:
             files.update(profile["edit"]["files"])
+        if adv["lora"]:
+            files["--lora-model-dir"] = "loras"
         for option, rel in files.items():
             cmd += [option, str(MODELS / rel)]
         cmd += ["--cfg-scale", str(cfg), "--steps", str(steps),
                 "-H", str(h), "-W", str(w), "-s", str(seed), "--offload-to-cpu"]
-        if profile["sampler"]:
-            cmd += ["--sampling-method", profile["sampler"]]
+        sampler = adv["sampler"] if not use_edit else profile["sampler"]
+        if sampler:
+            cmd += ["--sampling-method", sampler]
         if w * h > TILE_ABOVE:
             cmd.append("--vae-tiling")
         engine_prompt = prompt
-        if editing:
-            cmd += ["-r", str(self.edit_src)]
+        if use_edit:
+            cmd += ["-r", spec["edit_src"]]
             engine_prompt += profile["edit"]["prompt_suffix"]
+        elif mask:
+            cmd += ["-i", spec["edit_src"], "--mask", mask, "--strength", "1.0"]
+        if adv["negative"] and not use_edit:
+            cmd += ["-n", adv["negative"]]
+        if adv["lora"]:
+            engine_prompt += f"<lora:styles/{Path(adv['lora']).stem}:{adv['lora_weight']}>"
         cmd += ["-p", engine_prompt, "-o", str(job["raw"])]
+        self.begin_ui(f"Starting: {w} x {h}, seed {seed}..." + (f"  [{spec['label']}]" if spec["label"] else ""))
+        try:
+            job["proc"] = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError as e:
+            self.finish_ui()
+            return self.launch_failed(spec, f"Could not start the image engine: {e}", interactive)
+        self.job = job
+        threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
+        return True
 
+    def begin_ui(self, text):
         self.save_settings()
         self.log_lines = []
         self.set_log("")
@@ -1301,79 +1507,70 @@ class Studio:
         self.cancel_btn.state(["!disabled"])
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
-        self.status.configure(text=f"Starting: {w} x {h}, seed {seed}...")
+        self.status.configure(text=text)
         self.started = time.time()
-        try:
-            job["proc"] = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except OSError as e:
-            self.finish_ui()
-            messagebox.showerror("MOSS Image Studio", f"Could not start the image engine:\n{e}")
-            return
-        self.job = job
-        threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
 
-    def start_cloud(self, prompt, w, h, editing, out_dir):
+    def launch_failed(self, spec, message, interactive):
+        if interactive:
+            messagebox.showerror("MOSS Image Studio", message)
+        else:
+            self.status.configure(text=f"Skipped: {message}")
+            self.queue_result(spec, None, message)
+        return False
+
+    def launch_cloud(self, spec, interactive):
         """Nano Banana: send the request to Google in a worker thread."""
         api_key = C.find_key(self.settings)
-        if not api_key:
+        if not api_key and interactive:
             self.edit_api_key()
             api_key = C.find_key(self.settings)
-            if not api_key:
-                return
-        scr = None if editing else self.screen_choice()
+        if not api_key:
+            return self.launch_failed(spec, "Nano Banana needs your Gemini API key.", interactive)
+        profile = PROFILES[spec["model"]]
+        editing, scr, w, h = spec["editing"], spec["screen"], spec["w"], spec["h"]
         if editing:
-            with Image.open(self.edit_src) as im:
+            with Image.open(spec["edit_src"]) as im:
                 sw, sh = im.size
-            aspect, size = None, C.size_for_pixels(sw * sh)
-            target = None
+            aspect, size, target = None, C.size_for_pixels(sw * sh), None
             label = f"{size}_edit"
         else:
             rw, rh = (scr["W"], scr["H"]) if scr else (w, h)
-            aspect = C.nearest_aspect(rw, rh)
-            size = C.size_for_pixels(w * h)
-            target = rw / rh                       # trim Google's picture to exactly this shape
+            aspect, size, target = C.nearest_aspect(rw, rh), C.size_for_pixels(w * h), rw / rh
             label = f"{aspect.replace(':', 'x')}_{size}"
             if scr:
                 label += f"_{'screens' if len(scr['parts']) > 1 else 'screen'}{scr['W']}x{scr['H']}"
         price = C.PRICE_USD[size]
         if not self.settings.get("cloud_ok"):
+            if not interactive:
+                return self.launch_failed(spec, "Nano Banana hasn't been confirmed in the window yet.", False)
             sent = "your prompt and the picture" if editing else "your prompt"
             if not messagebox.askokcancel(
                     "Nano Banana (Google cloud)",
                     f"This sends {sent} to Google, and each picture is billed to your Gemini API key "
                     f"(about ${price:.2f} at {size} size).\n\nPictures from Google carry its invisible SynthID "
                     "watermark. Continue? (You won't be asked again.)"):
-                return
+                return False
             self.settings["cloud_ok"] = True
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        final = out_dir / f"{self.profile['prefix']}_{stamp}_{label}.{self.fmt.get()}"
+        final = Path(spec["out_dir"]) / f"{profile['prefix']}_{stamp}_{label}.{spec['fmt']}"
         when = datetime.now()
-        tokens = self.count_tokens(prompt)
+        prompt = spec["prompt"]
+        src_name = Path(spec["edit_src"]).name if editing else None
         meta = dict(title=("Edit: " if editing else "") + auto_title(prompt),
-                    subject=f"Edited from {self.edit_src.name}" if editing else "", comment=prompt,
-                    authors=self.authors.get().strip(), copyright=self.copyright.get().strip(),
-                    tags=M.split_tags(self.tags.get()), software=SOFTWARE,
+                    subject=f"Edited from {src_name}" if editing else "", comment=prompt,
+                    authors=spec["authors"], copyright=spec["copyright"], tags=spec["tags"], software=SOFTWARE,
                     date_taken=when.strftime("%Y:%m:%d %H:%M:%S"), settings="")
         job = dict(prompt=prompt, w=w, h=h, seed="n/a", final=final, raw=final.with_name(final.stem + ".engine.png"),
-                   tokens=tokens, save_txt=self.save_txt.get(), when=when, meta=meta, profile=self.profile,
-                   steps="n/a", cfg="n/a", edit_src=self.edit_src.name if editing else None,
-                   edit_path=self.edit_src if editing else None,
-                   screen=scr, shape=self.aspect.get(), tier=self.tier.get(), model=self.model_key,
-                   upscale=bool(scr) and self.upscale.get(), split=bool(scr) and self.split.get(),
+                   tokens=self.count_tokens(prompt), save_txt=spec["save_txt"], when=when, meta=meta, profile=profile,
+                   steps="n/a", cfg="n/a", edit_src=src_name, edit_path=spec["edit_src"] if editing else None,
+                   screen=scr, shape=spec["shape"], tier=spec["tier"], model=spec["model"],
+                   upscale=spec["upscale"], split=spec["split"], ai_upscale=spec["ai_upscale"],
                    cancelled=False, cloud=True, proc=None, api_key=api_key,
-                   aspect=aspect, size=size, target=target, price=price)
-        self.save_settings()
-        self.log_lines = []
-        self.set_log("")
-        self.go_btn.state(["disabled"])
-        self.cancel_btn.state(["!disabled"])
-        self.progress.configure(mode="indeterminate")
-        self.progress.start(12)
-        self.status.configure(text="Sending to Google...")
-        self.started = time.time()
+                   aspect=aspect, size=size, target=target, price=price, spec=spec)
+        self.begin_ui("Sending to Google..." + (f"  [{spec['label']}]" if spec["label"] else ""))
         self.job = job
         threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
+        return True
 
     def run_cloud(self, job):
         """Worker thread for Nano Banana: ask Google, trim to shape, then finish the files like a local picture."""
@@ -1466,11 +1663,15 @@ class Studio:
                         self.progress.start(12)
                 elif kind == "done":
                     self.on_job_done(*data)
+                elif kind == "remote":
+                    X.remote_request(self, data)
                 elif kind == "tokenizer":
                     self.tokenizer = data
                     self.update_tokens()
         except queue.Empty:
             pass
+        if getattr(self, "remote_server", None):
+            X.remote_tick(self)
         if self.job:
             secs = int(time.time() - self.started)
             self.root.title(f"MOSS Image Studio - working {secs // 60}:{secs % 60:02d}")
@@ -1502,21 +1703,28 @@ class Studio:
             return
         self.job = None
         self.finish_ui()
+        spec = job.get("spec") or {}
+        unattended = spec.get("queued")
         if job["cancelled"]:
             self.status.configure(text="Cancelled.")
+            self.queue_result(spec, None, "cancelled")
+            self.queue_running = False             # Cancel also stops the queue
             return
         if error:
             self.status.configure(text="No picture was made." if files is None else "Problem saving.")
             log = "\n".join(self.log_lines)
             if MEMORY_ERROR_RE.search(log):
                 self.status.configure(text="Not enough memory for this size.")
-                messagebox.showerror("MOSS Image Studio", memory_advice(job))
-                return
-            if job.get("cloud"):
-                messagebox.showerror("Nano Banana (Google cloud)", f"Sorry: {error}")
-                return
-            tail = "\n".join(self.log_lines[-12:])
-            messagebox.showerror("MOSS Image Studio", f"Sorry: {error}\n\nLast engine messages:\n{tail}")
+                message = memory_advice(job)
+            elif job.get("cloud"):
+                message = f"Sorry: {error}"
+            else:
+                tail = "\n".join(self.log_lines[-12:])
+                message = f"Sorry: {error}\n\nLast engine messages:\n{tail}"
+            self.queue_result(spec, None, message.splitlines()[0])
+            if not unattended:
+                messagebox.showerror("MOSS Image Studio", message)
+            self.after_job()
             return
         secs = int(time.time() - self.started)
         extra = f" ({len(files) - 1} screen pictures too)" if len(files) > 1 else ""
@@ -1528,6 +1736,49 @@ class Studio:
         self.save_settings()
         self.on_seed_mode()
         self.show_picture(files[0])
+        self.queue_result(spec, files[0], None)
+        self.after_job()
+
+    # ---------------- queue ----------------
+    def queue_add(self, spec, label="", group=None):
+        spec = dict(spec, label=label, group=group)
+        self.queue.append(spec)
+        if group:
+            self.groups.setdefault(group, dict(total=0, results=[]))["total"] += 1
+        return spec
+
+    def queue_start(self):
+        if self.queue and not self.job:
+            self.queue_running = True
+            self.run_next_queued()
+
+    def run_next_queued(self):
+        if self.job or not self.queue:
+            return
+        spec = self.queue.pop(0)
+        spec["queued"] = True
+        if not self.launch(spec, interactive=False):
+            self.after_job()
+
+    def after_job(self):
+        if self.queue_running and self.queue:
+            self.root.after(800, self.run_next_queued)
+        else:
+            self.queue_running = False
+
+    def queue_result(self, spec, file, error):
+        if file:
+            X.remote_note_picture(self, file, (spec or {}).get("prompt", ""))
+        if not spec:
+            return
+        self.queue_done.append((spec, file, error))
+        self.queue_done = self.queue_done[-200:]
+        group = self.groups.get(spec.get("group"))
+        if group is not None:
+            group["results"].append((spec, file, error))
+            if len(group["results"]) >= group["total"]:
+                X.show_group(self, spec["group"])
+        X.refresh_queue_window(self)
 
     def finish_ui(self):
         self.progress.stop()
@@ -2086,6 +2337,7 @@ class Studio:
         if self.job and not messagebox.askyesno("MOSS Image Studio", "A picture is still being made. Stop it and close?"):
             return
         self.cancel()
+        X.stop_remote(self)
         self.save_settings()
         self.root.destroy()
 
@@ -2135,6 +2387,26 @@ def selftest(root, out_dir):
     root.after(1500, go)
 
 
+def wallpaper_of_the_day(root):
+    """Run by Windows Task Scheduler: make today's wallpaper without showing the window, set it, and quit."""
+    root.withdraw()
+    app = Studio(root, check=False)
+    log = HERE / "wallpaper-of-the-day.log"
+
+    def done(message):
+        try:
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M}  {message}\n")
+        except OSError:
+            pass
+        root.after(1500, root.destroy)
+
+    if app.missing_files(X.wotd_settings(app)["model"]):
+        done("Skipped: the chosen model isn't downloaded.")
+        return
+    root.after(1500, lambda: X.run_wotd(app, done))
+
+
 def main():
     try:  # sharp text on high-DPI screens
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -2143,6 +2415,8 @@ def main():
     root = tk.Tk()
     if len(sys.argv) == 3 and sys.argv[1] == "--selftest":
         selftest(root, sys.argv[2])
+    elif len(sys.argv) == 2 and sys.argv[1] == "--wallpaper-of-the-day":
+        wallpaper_of_the_day(root)
     else:
         Studio(root)
     root.mainloop()
