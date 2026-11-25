@@ -33,3 +33,4 @@ moss-image-pc/*-previous/
 moss-image-pc/*-update/
 moss-image-pc/*-new/
 moss-image-pc/*-removed/
+moss-image-pc/*.exe

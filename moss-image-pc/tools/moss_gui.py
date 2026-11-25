@@ -23,6 +23,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
+Image.MAX_IMAGE_PIXELS = 250_000_000      # big AI-upscaled copies of our own pictures are fine
 
 import moss_cloud as C
 import moss_describe as D
@@ -30,7 +31,7 @@ import moss_meta as M
 import moss_updates as U
 import moss_extras as X
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -328,14 +329,65 @@ def write_txt(final, job):
         pass
 
 
-def ai_upscale(src, dest):
-    """4x Real-ESRGAN upscale with the image engine. Raises RuntimeError on failure."""
+UPSCALE_MAX_SIDE = 16384          # the engine refuses 4x results bigger than this per side...
+UPSCALE_MAX_PIXELS = 64_000_000   # ...or than 64 megapixels
+UPSCALE_TILE = 1000               # bigger pictures are done in pieces this size (4000 px out)
+UPSCALE_OVERLAP = 32              # extra context around each piece so the joins don't show
+
+
+def _upscale_once(src, dest):
     cmd = [str(SD_CLI), "-M", "upscale", "--upscale-model", str(UPSCALER), "-i", str(src), "-o", str(dest)]
     run = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, timeout=1800,
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if run.returncode != 0 or not Path(dest).exists():
-        tail = run.stdout.decode("utf-8", "replace").strip().splitlines()[-3:]
-        raise RuntimeError("AI upscaling failed: " + " ".join(tail))
+        text = (run.stdout + b"\n" + run.stderr).decode("utf-8", "replace")
+        errors = [ln for ln in text.splitlines() if "[E]" in ln or "error" in ln.lower()]
+        detail = " ".join(errors[-2:] or text.strip().splitlines()[-2:])
+        raise RuntimeError("AI upscaling failed: " + re.sub(r"\s*---\s*\S+:\d+", "", detail).strip())
+
+
+def ai_upscale(src, dest, say=None):
+    """4x Real-ESRGAN upscale with the image engine. Pictures too big for the engine in one go are
+    upscaled in overlapping pieces and joined. Raises RuntimeError on failure."""
+    src, dest = Path(src), Path(dest)
+    with Image.open(src) as im:
+        w, h = im.size
+        fits = 4 * max(w, h) <= UPSCALE_MAX_SIDE and 16 * w * h <= UPSCALE_MAX_PIXELS
+        if fits and im.mode in ("RGB", "L"):
+            _upscale_once(src, dest)
+            return
+        picture = im.convert("RGB")
+    if fits:                                        # e.g. a picture with transparency: flatten first
+        flat = dest.with_name(dest.stem + ".flat.png")
+        picture.save(flat, "PNG", compress_level=1)
+        try:
+            _upscale_once(flat, dest)
+        finally:
+            flat.unlink(missing_ok=True)
+        return
+    t, o = UPSCALE_TILE, UPSCALE_OVERLAP
+    cols, rows = -(-w // t), -(-h // t)
+    canvas = Image.new("RGB", (w * 4, h * 4))
+    piece_in, piece_out = dest.with_name(dest.stem + ".piece.png"), dest.with_name(dest.stem + ".piece4.png")
+    try:
+        for r in range(rows):
+            for c in range(cols):
+                if say:
+                    say(f"AI upscaling piece {r * cols + c + 1} of {rows * cols}...")
+                x0, y0 = c * t, r * t
+                x1, y1 = min(x0 + t, w), min(y0 + t, h)
+                cx0, cy0 = max(x0 - o, 0), max(y0 - o, 0)      # the piece, with context around it
+                cx1, cy1 = min(x1 + o, w), min(y1 + o, h)
+                picture.crop((cx0, cy0, cx1, cy1)).save(piece_in, "PNG", compress_level=1)
+                _upscale_once(piece_in, piece_out)
+                with Image.open(piece_out) as big:
+                    core = big.convert("RGB").crop((4 * (x0 - cx0), 4 * (y0 - cy0),
+                                                    4 * (x1 - cx0), 4 * (y1 - cy0)))
+                canvas.paste(core, (4 * x0, 4 * y0))
+        canvas.save(dest, "PNG", compress_level=1)
+    finally:
+        piece_in.unlink(missing_ok=True)
+        piece_out.unlink(missing_ok=True)
 
 
 def upscale_picture(src, factor, say):
@@ -344,7 +396,7 @@ def upscale_picture(src, factor, say):
     out = src.with_name(f"{src.stem}_x{factor}{src.suffix}")
     tmp = src.with_name(f"{src.stem}.x4.tmp.png")
     say(f"AI upscaling {src.name} (this can take a minute for big pictures)...")
-    ai_upscale(src, tmp)
+    ai_upscale(src, tmp, say)
     with Image.open(src) as im:
         target = (im.width * factor, im.height * factor)
     if factor != 4:
@@ -369,7 +421,7 @@ def finish_files(job, say):
             say(f"Sharpening with AI upscaling, then fitting to {scr['W']} x {scr['H']}...")
             source = raw.with_name(raw.stem + ".x4.png")
             try:
-                ai_upscale(raw, source)
+                ai_upscale(raw, source, say)
             except Exception:
                 source = raw                        # fall back to ordinary scaling
         else:

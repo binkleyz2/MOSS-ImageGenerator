@@ -1,16 +1,16 @@
 # Windows file properties for "MOSS Image Studio.exe" (used by PyInstaller --version-file).
 # Keep the version numbers in step with __version__ in moss-image-pc/tools/moss_gui.py.
 VSVersionInfo(
-  ffi=FixedFileInfo(filevers=(1, 4, 0, 0), prodvers=(1, 4, 0, 0), mask=0x3f, flags=0x0,
+  ffi=FixedFileInfo(filevers=(1, 4, 1, 0), prodvers=(1, 4, 1, 0), mask=0x3f, flags=0x0,
                     OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
   kids=[
     StringFileInfo([StringTable('040904B0', [
       StringStruct('FileDescription', 'MOSS Image Studio'),
-      StringStruct('FileVersion', '1.4.0'),
+      StringStruct('FileVersion', '1.4.1'),
       StringStruct('InternalName', 'MOSS Image Studio'),
       StringStruct('OriginalFilename', 'MOSS Image Studio.exe'),
       StringStruct('ProductName', 'MOSS-ImageGenerator'),
-      StringStruct('ProductVersion', '1.4.0'),
+      StringStruct('ProductVersion', '1.4.1'),
       StringStruct('LegalCopyright', 'GPL-3.0')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]
