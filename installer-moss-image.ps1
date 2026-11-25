@@ -1,5 +1,5 @@
 # install-moss-image.ps1
-# Installs MOSS-Image (stable-diffusion.cpp master-1127-79dc7ca) into the moss-image-pc folder next to this script,
+# Installs MOSS-Image (stable-diffusion.cpp master-1133-52491bd) into the moss-image-pc folder next to this script,
 # runs a test image, and creates "MOSS Image.bat" on the Desktop.
 # Safe to re-run: finished downloads are skipped, partial ones resume.
 
@@ -11,8 +11,8 @@ $Bin     = Join-Path $Root 'bin'
 $Models  = Join-Path $Root 'models'
 $Outputs = Join-Path $Root 'outputs'
 $LogFile = Join-Path $env:TEMP 'moss-image-install-log.txt'
-$SdTag   = 'master-1127-79dc7ca'   # stable-diffusion.cpp release; bump both lines together
-$SdShort = '79dc7ca'
+$SdTag   = 'master-1133-52491bd'   # stable-diffusion.cpp release; bump both lines together
+$SdShort = '52491bd'
 $Release = "https://github.com/leejet/stable-diffusion.cpp/releases/download/$SdTag"
 $GB = 1GB
 
