@@ -26,3 +26,10 @@ moss-image-install-log.txt
 # Engine backups and update staging
 moss-image-pc/bin-old-*/
 moss-image-pc/engine-update/
+
+# Describer engine (llama.cpp) and engine update leftovers
+moss-image-pc/llm-bin/
+moss-image-pc/*-previous/
+moss-image-pc/*-update/
+moss-image-pc/*-new/
+moss-image-pc/*-removed/

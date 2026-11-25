@@ -22,6 +22,12 @@ MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/
 
   \*Qwen edits normal pictures well, in about 50 s at 1 MP. Very dark pictures can come out over-brightened, so use MOSS or FLUX for those.
 - **Edit a picture by instruction.** Choose **Edit a picture**, pick any PNG or JPEG, and describe the change, e.g. *"Change only the orange cat to a black cat. Keep everything else unchanged."* The rest of the picture stays as it was.
+- **Write a prompt from any picture.** Pick a photo or an AI picture and the app writes a detailed prompt that recreates it, in a form all four models understand. Any readable text is copied in quotes.
+  - It runs locally by default (free, private) with [llama.cpp](https://github.com/ggml-org/llama.cpp) and the Qwen vision files you already have; about 5-10 seconds.
+  - Or use Google Gemini 3.5 Flash-Lite with your API key, about $0.001 per picture.
+- **Check for updates.** Compares every downloaded model file with its source on Hugging Face (by SHA-256 checksum), and the two engines with their latest GitHub releases.
+  - Updates install verified. Model files keep the old copy until the new one passes its checksum.
+  - Engines are tested after installing and put back automatically if the test fails. There's also an **Undo** button for the image engine.
 - **Prompt box with a live token count.** It counts with MOSS's own Qwen 3.5 tokenizer (exact for MOSS, close for the other models) and handles long, multi-line prompts with quotes and special characters.
 - **Sizes and shapes.** Presets for common shapes (16:9, 9:16, 1:1, 4:3, 3:2, 21:9 ...) at four sizes, from about 1 MP (around a minute) up to about 5 MP, e.g. 3440 x 1440. You can also type a custom size.
 - **Pictures that fit your screens.** The app detects your monitors and offers:
@@ -113,6 +119,15 @@ If the app opens with a message that the engine or models weren't found, it's in
 4. Click **Make picture** (or press Ctrl+Enter). The estimate under the size shows how long the chosen model should take.
 5. The picture appears on the right with its details. **Open picture** and **Show in folder** are below it.
 
+**To start from an existing picture**, click **From a picture...** under the prompt, or **Write a prompt from this** under the picture shown:
+1. Choose the picture and the describer: Qwen on this PC, or Gemini in the cloud.
+2. Pick **Detailed** or **Short**.
+3. Click **Write prompt**. Edit the result if you like, then click **Use as prompt**.
+
+The first time, the local describer offers to download llama.cpp (about 360 MB) from its official releases. It reuses the Qwen 3.5 vision files from the MOSS editing add-on, or Qwen Image's Qwen3-VL files.
+
+**To check for updates**, click **Check for updates...** at the bottom right. The first check reads every model file once (about half a minute); later checks take a second. Tick what to install, then click **Install selected**.
+
 **To change one detail**, there are two ways:
 
 - **Edit a picture** (any model; MOSS needs its editing add-on):
@@ -167,6 +182,8 @@ It makes one small picture through the app and writes `selftest-result.json`.
 - **A model is marked *(not downloaded)*, or Edit says files are missing.** Run `download-models.ps1` and pick that model or the MOSS editing add-on.
 - **Nano Banana says the key wasn't accepted (401), isn't allowed (403) or is out of quota (429).** Check the key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and that billing is turned on. Google has no free tier for image output.
 - **Nano Banana returned no picture.** Google's content rules blocked the prompt. The app shows any reason Google gave.
+- **"Write prompt" says the local describer isn't available.** Choose its *get the local describer* option to download llama.cpp. You also need the MOSS editing add-on or Qwen Image 2.1 from `download-models.ps1`, since those include the vision files it uses.
+- **An engine update failed its test.** The app puts the previous version back automatically and says so. Nothing else is needed; try again after the next release.
 - **A Qwen edit looks over-brightened or harsh.** This happens with very dark pictures. Use MOSS or FLUX for those.
 
 ## What's in this repo
@@ -176,6 +193,8 @@ It makes one small picture through the app and writes `selftest-result.json`.
 | `installer-moss-image.ps1` | Downloads and sets up the engine and MOSS-Image, and makes a test picture |
 | `download-models.ps1` | Downloads the optional models: MOSS editing add-on, FLUX.2 Klein, Qwen Image 2.1 |
 | `moss-image-pc/tools/moss_gui.py` | MOSS Image Studio |
+| `moss-image-pc/tools/moss_describe.py` | Write a prompt from a picture: local (llama.cpp + Qwen vision) or Gemini |
+| `moss-image-pc/tools/moss_updates.py` | Checks and installs model and engine updates, verified, with undo |
 | `moss-image-pc/tools/moss_cloud.py` | Nano Banana: Google Gemini API requests and the encrypted API key |
 | `moss-image-pc/tools/moss_meta.py` | Reads and writes picture details (EXIF / XMP / PNG text) |
 | `moss-image-pc/tools/prompt_info.py` | Token counter and prompt `.txt` writer used by the launcher |
@@ -222,6 +241,7 @@ The optional models belong to their makers:
 This project also relies on:
 
 - [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) by leejet and contributors (MIT): the engine that runs the models
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) by ggml-org and contributors (MIT): runs the local picture describer, with Qwen 3.5 or Qwen3-VL vision models
 - [Qwen3.5-9B](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF) (GGUF build by unsloth): the text encoder
 - FLUX.2 VAE: the image decoder
 - Python, Tk, [Pillow](https://python-pillow.org) and Hugging Face [tokenizers](https://github.com/huggingface/tokenizers), bundled in the `.exe`

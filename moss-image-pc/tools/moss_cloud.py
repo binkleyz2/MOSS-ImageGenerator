@@ -150,12 +150,23 @@ def generate(api_key, prompt, aspect=None, size="1K", image_bytes=None, image_mi
     if aspect:
         response_format["aspect_ratio"] = aspect
     body = {"model": MODEL_ID, "input": parts, "response_format": response_format}
+    data = post(api_key, body, timeout)
+    picture, texts = extract(data)
+    if picture is None:
+        said = " ".join(t.strip() for t in texts if t.strip())
+        raise CloudError("Google returned no picture" + (f". It said: {said[:600]}" if said else
+                         ". The prompt may have been blocked by Google's content rules."))
+    return picture
+
+
+def post(api_key, body, timeout=300):
+    """Send one Interactions API request; returns the JSON reply or raises CloudError in plain words."""
     request = urllib.request.Request(
         API_URL, data=json.dumps(body).encode("utf-8"), method="POST",
         headers={"x-goog-api-key": api_key, "Content-Type": "application/json", "Api-Revision": API_REVISION})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as reply:
-            data = json.loads(reply.read().decode("utf-8"))
+            return json.loads(reply.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read().decode("utf-8")).get("error", {}).get("message", "")
@@ -174,9 +185,3 @@ def generate(api_key, prompt, aspect=None, size="1K", image_bytes=None, image_mi
         raise CloudError(f"Couldn't reach Google: {e.reason}. Check the internet connection.") from None
     except TimeoutError:
         raise CloudError("Google took too long to answer. Try again.") from None
-    picture, texts = extract(data)
-    if picture is None:
-        said = " ".join(t.strip() for t in texts if t.strip())
-        raise CloudError("Google returned no picture" + (f". It said: {said[:600]}" if said else
-                         ". The prompt may have been blocked by Google's content rules."))
-    return picture

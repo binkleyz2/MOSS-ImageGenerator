@@ -12,6 +12,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from ctypes import wintypes
@@ -24,9 +25,11 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 import moss_cloud as C
+import moss_describe as D
 import moss_meta as M
+import moss_updates as U
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -574,8 +577,11 @@ class Studio:
         self.token_label.grid(row=4, column=0, sticky="w", pady=(6, 0))
         ttk.Button(box, text="Clear", command=lambda: (self.prompt.delete("1.0", "end"), self.update_tokens())
                    ).grid(row=4, column=1, sticky="e", pady=(6, 0), padx=4)
-        ttk.Button(box, text="Use an earlier picture...", command=self.reuse_from_file
-                   ).grid(row=4, column=2, columnspan=2, sticky="e", pady=(6, 0))
+        row4 = ttk.Frame(box)
+        row4.grid(row=4, column=2, columnspan=2, sticky="e", pady=(6, 0))
+        ttk.Button(row4, text="Earlier picture...", command=self.reuse_from_file).pack(side="left")
+        ttk.Button(row4, text="From a picture...", command=lambda: self.open_describe(None)
+                   ).pack(side="left", padx=(4, 0))
         self.prompt.bind("<<Modified>>", self.on_prompt_change)
 
         # Size
@@ -705,6 +711,7 @@ class Studio:
             ttk.Button(btns, text="Open picture", command=lambda: self.open_path(self.current)),
             ttk.Button(btns, text="Show in folder", command=self.show_in_folder),
             ttk.Button(btns, text="Make a variation (same seed)", command=self.variation),
+            ttk.Button(btns, text="Write a prompt from this", command=lambda: self.open_describe(self.current)),
         ]
         for b in self.pic_buttons:
             b.pack(side="left", padx=(0, 6))
@@ -747,6 +754,7 @@ class Studio:
         cb.bind("<<ComboboxSelected>>", lambda e: (self.apply_theme(), self.save_settings()))
         self.combos.append(cb)
         ttk.Label(lg, text="Theme").pack(side="right", padx=(0, 6))
+        ttk.Button(lg, text="Check for updates...", command=self.open_updates).pack(side="right", padx=(0, 16))
         self.log = self.make_text(right, height=8, wrap="none", font=("Consolas", 8), state="disabled")
 
     # ---------------- theme ----------------
@@ -799,6 +807,7 @@ class Studio:
         st.configure("Hint.TLabel", foreground=c["hint"])
         st.configure("Status.TLabel", font=("Segoe UI", 10, "bold"))
         st.configure("Title.TLabel", font=("Segoe UI", 12, "bold"))
+        self.texts = [t for t in self.texts if t.winfo_exists()]      # drop boxes from closed windows
         for t in self.texts:
             t.configure(background=c["text_bg"], foreground=c["text_fg"], insertbackground=c["text_fg"],
                         selectbackground=c["select"], selectforeground=c["text_fg"],
@@ -1203,6 +1212,9 @@ class Studio:
     # ---------------- making a picture ----------------
     def start(self):
         if self.job:
+            return
+        if getattr(self, "updating", False):
+            messagebox.showinfo("MOSS Image Studio", "An update is being installed. Try again when it's done.")
             return
         editing = self.mode.get() == "edit"
         if editing and not self.can_edit():
@@ -1691,6 +1703,384 @@ class Studio:
         self.log.insert("end", line + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
+
+    # ---------------- small helper windows ----------------
+    def make_window(self, title):
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.transient(self.root)
+        try:
+            win.iconbitmap(str(RESOURCES / "moss.ico"))
+        except tk.TclError:
+            pass
+        if self.colors is DARK:
+            win.configure(background=DARK["bg"])
+        frame = ttk.Frame(win, padding=14)
+        frame.pack(fill="both", expand=True)
+        return win, frame
+
+    def poll_worker(self, q, handlers, win):
+        """Pass messages from a worker thread to handlers on the window's thread."""
+        try:
+            while True:
+                kind, data = q.get_nowait()
+                handlers[kind](data)
+        except queue.Empty:
+            pass
+        if win.winfo_exists():
+            win.after(150, lambda: self.poll_worker(q, handlers, win))
+
+    # ---------------- picture to prompt ----------------
+    def describer_choices(self):
+        """[(label, kind, model, projector)]; kind is 'local', 'cloud' or 'get-local'."""
+        choices = [(label, "local", m, p) for label, m, p in D.local_options(ROOT)]
+        if not choices:
+            choices.append(("Qwen on this PC: get the local describer (about 360 MB)", "get-local", None, None))
+        key_note = "" if C.find_key(self.settings) else ", needs API key"
+        choices.append((f"Google Gemini 3.5 Flash-Lite (cloud, {D.CLOUD_PRICE}{key_note})", "cloud", None, None))
+        return choices
+
+    def open_describe(self, picture=None):
+        win, f = self.make_window("Write a prompt from a picture")
+        state = dict(picture=Path(picture) if picture else None, thumb=None, busy=False)
+        q = queue.Queue()
+
+        top = ttk.Frame(f)
+        top.grid(row=0, column=0, columnspan=3, sticky="we")
+        thumb = ttk.Label(top, text="No picture chosen.", anchor="center", width=40)
+        thumb.pack(side="left")
+        side = ttk.Frame(top)
+        side.pack(side="left", fill="y", padx=(12, 0))
+        name = ttk.Label(side, text="", style="Hint.TLabel", wraplength=260)
+        name.pack(anchor="w")
+        ttk.Label(side, text="Works with photos and AI pictures. The prompt describes what is visible, in a "
+                             "form all four models understand.", style="Hint.TLabel", wraplength=260
+                  ).pack(anchor="w", pady=(6, 10))
+
+        def set_picture(path):
+            try:
+                with Image.open(path) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((300, 220), Image.Resampling.LANCZOS)
+                    state["thumb"] = ImageTk.PhotoImage(im)
+            except Exception as e:
+                messagebox.showerror("Write a prompt", f"Can't open that picture:\n{e}", parent=win)
+                return
+            state["picture"] = Path(path)
+            thumb.configure(image=state["thumb"], text="")
+            name.configure(text=Path(path).name)
+
+        def choose():
+            path = filedialog.askopenfilename(parent=win, initialdir=self.out_dir.get() or str(DEFAULT_OUT),
+                                              title="Choose a picture to describe",
+                                              filetypes=[("Pictures", "*.png *.jpg *.jpeg *.webp *.bmp"),
+                                                         ("All files", "*.*")])
+            if path:
+                set_picture(path)
+
+        ttk.Button(side, text="Choose a picture...", command=choose).pack(anchor="w")
+        ttk.Button(side, text="Use the picture shown",
+                   command=lambda: self.current and set_picture(self.current)).pack(anchor="w", pady=(4, 0))
+
+        ttk.Label(f, text="Describer").grid(row=1, column=0, sticky="w", pady=(12, 0))
+        choices = self.describer_choices()
+        who = tk.StringVar()
+        who_box = ttk.Combobox(f, textvariable=who, state="readonly", width=58, values=[c[0] for c in choices])
+        who_box.grid(row=1, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(12, 0))
+        saved = self.settings.get("describer", "")
+        who_box.current(next((i for i, c in enumerate(choices) if c[0].split(" (")[0] == saved), 0))
+        ttk.Label(f, text="Length").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        length = tk.StringVar(value=self.settings.get("describe_length", "Detailed"))
+        lf = ttk.Frame(f)
+        lf.grid(row=2, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(6, 0))
+        for opt, tip in (("Detailed", "80-150 words"), ("Short", "30-60 words")):
+            ttk.Radiobutton(lf, text=f"{opt} ({tip})", value=opt, variable=length).pack(side="left", padx=(0, 12))
+
+        go = ttk.Button(f, text="Write prompt", style="Go.TButton")
+        go.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        status = ttk.Label(f, text="", style="Hint.TLabel", wraplength=420)
+        status.grid(row=3, column=2, sticky="w", pady=(12, 0))
+        result = self.make_text(f, height=9, width=70, wrap="word", font=("Segoe UI", 10))
+        result.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        self.apply_theme_to_text(result)
+        f.rowconfigure(4, weight=1)
+        f.columnconfigure(2, weight=1)
+
+        def use():
+            text = result.get("1.0", "end").strip()
+            if not text:
+                return
+            if self.mode.get() == "edit":
+                self.mode.set("new")
+                self.on_mode_change()
+            self.prompt.delete("1.0", "end")
+            self.prompt.insert("1.0", text)
+            self.update_tokens()
+            win.destroy()
+
+        def copy():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(result.get("1.0", "end").strip())
+            status.configure(text="Copied.")
+
+        bottom = ttk.Frame(f)
+        bottom.grid(row=5, column=0, columnspan=3, sticky="e", pady=(10, 0))
+        ttk.Button(bottom, text="Use as prompt", command=use).pack(side="left")
+        ttk.Button(bottom, text="Copy", command=copy).pack(side="left", padx=6)
+        ttk.Button(bottom, text="Close", command=win.destroy).pack(side="left")
+
+        def worker(kind, model, projector, picture, style):
+            try:
+                if kind == "get-local":
+                    q.put(("status", "Getting the local describer..."))
+                    U.update_engine(ROOT, U.install_item("llama"), lambda m: q.put(("status", m)))
+                    q.put(("installed", None))
+                    return
+                if kind == "local":
+                    text = D.describe_local(ROOT, model, projector, picture, style)
+                else:
+                    text = D.describe_cloud(C.find_key(self.settings), picture, style)
+                q.put(("text", text))
+            except Exception as e:
+                q.put(("error", str(e)))
+
+        def finish():
+            state["busy"] = False
+            go.state(["!disabled"])
+            win.configure(cursor="")
+
+        def on_text(text):
+            finish()
+            result.delete("1.0", "end")
+            result.insert("1.0", text)
+            secs = time.time() - state["t0"]
+            status.configure(text=f"Done in {secs:.0f} s. Edit it if you like, then Use as prompt.")
+
+        def on_error(msg):
+            finish()
+            status.configure(text="")
+            messagebox.showerror("Write a prompt", msg, parent=win)
+
+        def on_installed(_):
+            finish()
+            new = self.describer_choices()
+            who_box.configure(values=[c[0] for c in new])
+            choices[:] = new
+            who_box.current(0)
+            status.configure(text="The local describer is ready. Click Write prompt.")
+
+        def start():
+            if state["busy"]:
+                return
+            label, kind, model, projector = choices[who_box.current()]
+            if kind != "get-local" and not state["picture"]:
+                messagebox.showinfo("Write a prompt", "Choose a picture first.", parent=win)
+                return
+            if kind == "local" and self.job:
+                messagebox.showinfo("Write a prompt", "A picture is being made right now, and the local describer "
+                                    "needs the graphics card too. Try again when it's done, or use Gemini.", parent=win)
+                return
+            if kind == "cloud":
+                if not C.find_key(self.settings):
+                    self.edit_api_key()
+                    if not C.find_key(self.settings):
+                        return
+                if not self.settings.get("describe_cloud_ok"):
+                    if not messagebox.askokcancel("Google Gemini", "This sends the picture to Google, billed to "
+                                                  f"your Gemini API key ({D.CLOUD_PRICE}). Continue? "
+                                                  "(You won't be asked again.)", parent=win):
+                        return
+                    self.settings["describe_cloud_ok"] = True
+            if kind == "get-local" and not messagebox.askokcancel(
+                    "Local describer", "This downloads llama.cpp (about 360 MB) from its official GitHub "
+                    "releases into the llm-bin folder. It uses the Qwen vision files you already have. "
+                    "Continue?", parent=win):
+                return
+            self.settings["describer"] = label.split(" (")[0]
+            self.settings["describe_length"] = length.get()
+            self.save_settings()
+            state["busy"], state["t0"] = True, time.time()
+            go.state(["disabled"])
+            win.configure(cursor="watch")
+            status.configure(text="Looking at the picture..." if kind != "get-local" else "")
+            threading.Thread(target=worker, args=(kind, model, projector, state["picture"], length.get()),
+                             daemon=True).start()
+
+        go.configure(command=start)
+        if picture:
+            set_picture(picture)
+        self.poll_worker(q, dict(text=on_text, error=on_error, status=lambda m: status.configure(text=m),
+                                 installed=on_installed), win)
+
+    def apply_theme_to_text(self, t):
+        c = self.colors
+        t.configure(background=c["text_bg"], foreground=c["text_fg"], insertbackground=c["text_fg"],
+                    selectbackground=c["select"], selectforeground=c["text_fg"],
+                    highlightbackground=c["border"], highlightcolor=c["accent"])
+
+    # ---------------- updates ----------------
+    def open_updates(self):
+        win, f = self.make_window("Check for updates")
+        q = queue.Queue()
+        state = dict(items=[], vars=[], busy=False)
+        ttk.Label(f, text="Compares your model files with their sources on Hugging Face (by checksum), and the "
+                          "engines with their latest releases on GitHub. Nothing is changed until you choose "
+                          "Install.", wraplength=620, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        listing = ttk.Frame(f)
+        listing.grid(row=1, column=0, columnspan=2, sticky="we", pady=(10, 0))
+        status = ttk.Label(f, text="Checking...", style="Hint.TLabel", wraplength=620)
+        status.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        bar = ttk.Progressbar(f, mode="indeterminate")
+        bar.grid(row=3, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        buttons = ttk.Frame(f)
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        install_btn = ttk.Button(buttons, text="Install selected")
+        install_btn.pack(side="left")
+        undo_btn = ttk.Button(buttons, text="Undo last image-engine update")
+        undo_btn.pack(side="left", padx=6)
+        ttk.Button(buttons, text="Check again", command=lambda: check()).pack(side="left")
+        ttk.Button(buttons, text="Close", command=win.destroy).pack(side="left", padx=(6, 0))
+
+        def busy(on):
+            state["busy"] = on
+            self.updating = on
+            for b in (install_btn, undo_btn):
+                b.state(["disabled"] if on else ["!disabled"])
+            if on:
+                bar.start(12)
+            else:
+                bar.stop()
+                bar["value"] = 0
+                undo_btn.state(["!disabled"] if U.can_undo(ROOT, "sd") else ["disabled"])
+
+        def show(items):
+            for w in listing.winfo_children():
+                w.destroy()
+            state["items"], state["vars"] = items, []
+            for r, it in enumerate(items):
+                if "key" in it:
+                    label = U.ENGINES[it["key"]]["name"]
+                    mine = it.get("mine") or "not recorded"
+                    what = {"current": f"up to date ({mine})",
+                            "update": f"update: {mine} -> {it.get('tag')} ({U.fmt_size(it['size'])})",
+                            "error": f"couldn't check: {it['detail']}"}[it["status"]]
+                else:
+                    label = it["rel"]
+                    what = {"current": "up to date", "update": f"changed at the source ({U.fmt_size(it['size'])})",
+                            "error": f"couldn't check: {it['detail']}"}.get(it["status"], it["status"])
+                var = tk.BooleanVar(value=it["status"] == "update")
+                cb = ttk.Checkbutton(listing, text=label, variable=var)
+                cb.grid(row=r, column=0, sticky="w")
+                if it["status"] != "update":
+                    cb.state(["disabled"])
+                ttk.Label(listing, text=what, style="Hint.TLabel").grid(row=r, column=1, sticky="w", padx=(16, 0))
+                state["vars"].append(var)
+            n = sum(1 for it in items if it["status"] == "update")
+            status.configure(text=("Everything is up to date." if not n else
+                                   f"{n} update{'s' if n != 1 else ''} available. Tick what to install.")
+                             + "  Models not downloaded yet aren't listed; use download-models.ps1 for those.")
+
+        def check_worker():
+            try:
+                say = lambda m: q.put(("status", m))
+                items = U.check_engines(ROOT, say) + U.check_models(ROOT, say)
+                q.put(("checked", items))
+            except Exception as e:
+                q.put(("failed", f"Couldn't check for updates: {e}"))
+
+        def check():
+            if state["busy"]:
+                return
+            busy(True)
+            status.configure(text="Checking (the first check reads every model file once, about half a minute)...")
+            threading.Thread(target=check_worker, daemon=True).start()
+
+        def engine_selftest(key):
+            """True if the newly installed engine still works."""
+            if key == "sd":
+                out = Path(tempfile.mkdtemp(prefix="moss-selftest-"))
+                cmd = [sys.executable, "--selftest", str(out)] if FROZEN else \
+                      [sys.executable, str(Path(__file__).resolve()), "--selftest", str(out)]
+                subprocess.run(cmd, timeout=600, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                try:
+                    return json.loads((out / "selftest-result.json").read_text(encoding="utf-8")).get("ok", False)
+                except Exception:
+                    return False
+            options = D.local_options(ROOT)
+            if not options:
+                return (ROOT / "llm-bin" / "llama-mtmd-cli.exe").exists()
+            sample = Path(tempfile.mkdtemp(prefix="moss-selftest-")) / "red.png"
+            Image.new("RGB", (256, 256), (200, 30, 30)).save(sample)
+            try:
+                return bool(D.describe_local(ROOT, options[0][1], options[0][2], sample, "Short"))
+            except Exception:
+                return False
+
+        def install_worker(chosen):
+            say = lambda m: q.put(("status", m))
+            done, problems = [], []
+            for it in chosen:
+                try:
+                    if "key" in it:
+                        U.update_engine(ROOT, it, say)
+                        say(f"Testing the new {U.ENGINES[it['key']]['name']}...")
+                        if engine_selftest(it["key"]):
+                            done.append(f"{U.ENGINES[it['key']]['name']} -> {it['tag']}")
+                        else:
+                            U.undo_engine(ROOT, it["key"])
+                            problems.append(f"{U.ENGINES[it['key']]['name']}: the new version failed its test, "
+                                            "so the previous version was put back.")
+                    else:
+                        U.update_model(ROOT, it, say)
+                        done.append(it["rel"])
+                except Exception as e:
+                    problems.append(f"{it.get('rel') or U.ENGINES[it['key']]['name']}: {e}")
+            q.put(("installed", (done, problems)))
+
+        def install():
+            chosen = [it for it, var in zip(state["items"], state["vars"]) if var.get() and it["status"] == "update"]
+            if not chosen or state["busy"]:
+                return
+            if self.job:
+                messagebox.showinfo("Updates", "A picture is being made. Install when it's done.", parent=win)
+                return
+            total = sum(it["size"] for it in chosen)
+            if not messagebox.askokcancel("Updates", f"Download and install {len(chosen)} update"
+                                          f"{'s' if len(chosen) != 1 else ''} ({U.fmt_size(total)})? Engines are "
+                                          "tested after installing and put back if the test fails.", parent=win):
+                return
+            busy(True)
+            threading.Thread(target=install_worker, args=(chosen,), daemon=True).start()
+
+        def on_installed(result):
+            done, problems = result
+            busy(False)
+            self.refresh_model_list()
+            text = ("Installed:\n  " + "\n  ".join(done) if done else "Nothing was installed.")
+            if problems:
+                text += "\n\nProblems:\n  " + "\n  ".join(problems)
+            (messagebox.showwarning if problems else messagebox.showinfo)("Updates", text, parent=win)
+            check()
+
+        def undo():
+            if state["busy"] or not U.can_undo(ROOT, "sd"):
+                return
+            if not messagebox.askokcancel("Undo", "Put the previous image engine back?", parent=win):
+                return
+            try:
+                U.undo_engine(ROOT, "sd")
+                messagebox.showinfo("Undo", "The previous image engine is back.", parent=win)
+            except Exception as e:
+                messagebox.showerror("Undo", str(e), parent=win)
+            check()
+
+        install_btn.configure(command=install)
+        undo_btn.configure(command=undo)
+        self.poll_worker(q, dict(status=lambda m: status.configure(text=m),
+                                 checked=lambda items: (busy(False), show(items)),
+                                 failed=lambda m: (busy(False), status.configure(text=m)),
+                                 installed=on_installed), win)
+        check()
 
     def on_close(self):
         if self.job and not messagebox.askyesno("MOSS Image Studio", "A picture is still being made. Stop it and close?"):
