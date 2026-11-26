@@ -171,3 +171,100 @@ def enhance_cloud(api_key, idea, style="Detailed", timeout=120):
     if not text:
         raise C.CloudError("Google returned no prompt.")
     return text
+
+
+# ---------------- text check (read the words back from a picture) ----------------
+
+READ_TEXT = (
+    "Transcribe every piece of readable text in this picture exactly as it is written, letter by letter. "
+    "Keep spelling mistakes, extra letters and missing letters exactly as they appear; do not correct, "
+    "complete or guess any word. Put each separate line of text on its own line. If there is no readable text, "
+    "write NONE. Output only the text."
+)
+
+
+def text_reader(root):
+    """The local model used to read text back: Qwen3-VL if it's downloaded (it copies misspellings faithfully),
+    otherwise Qwen 3.5. Returns (model, projector) or None."""
+    options = local_options(root)
+    for label, model, projector in options:
+        if "Qwen3-VL" in label:
+            return model, projector
+    return (options[0][1], options[0][2]) if options else None
+
+
+def read_text_local(root, model, projector, picture, timeout=240):
+    """The lines of text a local vision model reads in a picture ([] if none)."""
+    llama = root / "llm-bin" / "llama-mtmd-cli.exe"
+    with tempfile.TemporaryDirectory() as tmp:
+        img = Path(tmp) / "picture.jpg"
+        img.write_bytes(small_copy(picture, 2048))
+        cmd = [str(llama), "-m", str(model), "--mmproj", str(projector), "--image", str(img),
+               "-p", READ_TEXT, "-ngl", "99", "--temp", "0", "-n", "2000", "-c", "8192", "--no-warmup"]
+        try:
+            run = subprocess.run(cmd, capture_output=True, timeout=timeout, cwd=str(root),
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Reading the text took too long.") from None
+    text = run.stdout.decode("utf-8", "replace")
+    if "<think>" in text:
+        if "</think>" not in text:
+            raise RuntimeError("The text reader didn't finish.")
+        text = text.split("</think>", 1)[1]
+    if run.returncode != 0:
+        raise RuntimeError("The text reader stopped.")
+    lines = [ln.strip().strip('"“”') for ln in text.splitlines()]
+    return [ln for ln in lines if ln and ln.upper() != "NONE"]
+
+
+def quoted_text(prompt):
+    """Words the picture must show: the "quoted" parts of a prompt, or the text of MOSS layout boxes."""
+    found = []
+    stripped = prompt.strip()
+    if stripped.startswith("{"):
+        try:
+            layout = json.loads(stripped)
+            found = [str(it.get("text", "")) for it in layout.get("items", []) if isinstance(it, dict)]
+        except (ValueError, AttributeError):
+            found = []
+    if not found:
+        found = re.findall(r'"([^"\n]{1,120})"', prompt) + re.findall(r"“([^”\n]{1,120})”", prompt)
+    out = []
+    for s in found:
+        s = " ".join(s.split())
+        if re.search(r"[0-9A-Za-z]", s) and s not in out:
+            out.append(s)
+    return out
+
+
+def _norm(s):
+    return " ".join(re.sub(r"[^0-9A-Z]+", " ", s.upper()).split())
+
+
+def text_score(expected, seen_lines):
+    """How well the text read from a picture matches what the prompt asked for.
+    Returns (all_exact, score 0-1, [(expected, closest text seen, similarity)])."""
+    from difflib import SequenceMatcher
+    seen = _norm(" ".join(seen_lines))
+    words = seen.split()
+    details = []
+    for e in expected:
+        ne = _norm(e)
+        if not ne:
+            continue
+        if f" {ne} " in f" {seen} ":
+            details.append((e, e, 1.0))
+            continue
+        n = len(ne.split())
+        best, best_text = 0.0, ""
+        for k in {max(1, n - 1), n, n + 1}:
+            for i in range(max(1, len(words) - k + 1)):
+                cand = " ".join(words[i:i + k])
+                r = SequenceMatcher(None, ne, cand).ratio()
+                if r > best:
+                    best, best_text = r, cand
+        details.append((e, best_text, round(best, 3)))
+    if not details:
+        return True, 1.0, []
+    score = sum(d[2] for d in details) / len(details)
+    return all(d[2] == 1.0 for d in details), score, details

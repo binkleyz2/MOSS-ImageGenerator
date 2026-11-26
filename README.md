@@ -28,7 +28,8 @@ MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/
 - **Gallery.** Browse everything you've made, search by prompt, filter by model. Right-click a picture to reuse its settings, edit it, describe it or open it.
 - **Improve a prompt.** Turns a short idea into a detailed prompt, locally (Qwen 3.5) or with Gemini.
 - **Queue, variations and compare.** Queue several pictures to run one after another, make 4 variations with different seeds, or **compare models** with the same prompt side by side.
-- **Paint to edit.** In Edit mode, paint over just the area to change and describe what goes there; the rest stays untouched.
+- **Paint to edit.** In Edit mode, paint over just the area to change and describe what goes there. Everything you didn't paint is kept pixel for pixel, so text and details there can't change.
+- **Text check.** When your prompt has words in "quotes", the app reads them back from the finished picture with the local Qwen3-VL vision model. If they're misspelled, it tries again with a new seed (up to 3 tries) and keeps the best one. It works with the models on this PC and adds about 5 seconds per picture.
 - **Advanced settings** per model: steps, guidance, sampler, a negative prompt, kept line breaks (to control text layout), and **style LoRAs**.
 - **Layout boxes (MOSS).** Draw boxes to place things and text exactly where you want them, using MOSS-Image's own layout format.
 - **Low-memory warning** before a big job if Windows is short on memory, instead of failing partway.
@@ -149,7 +150,14 @@ The first time, the local describer offers to download llama.cpp (about 360 MB) 
 
 **For wallpapers**, choose one of your screens (or **Screens: all**) as the Shape, then make the picture. Click **Set as wallpaper ▾** and choose **One per screen** for the sharpest result. To get a new one every day, use **More ▾ > Wallpaper of the day**.
 
-**To change only part of a picture**, choose **Edit a picture**, then **Paint area...**. Paint over the part to change (right-click erases), click **Use this area**, describe what should be there, and click **Edit picture**.
+**To change only part of a picture**, choose **Edit a picture**, then **Paint area...**. Paint over the part to change (right-click erases), click **Use this area**, describe what should be there, and click **Edit picture**. Everything outside the painted area stays exactly as it was.
+
+**To get text spelled right**, put the exact words in "quotes" and leave **Check that words in "quotes" come out right** ticked under the prompt. These things help most:
+- **Qwen Image** or **Nano Banana**: they're much better at text than FLUX.2 Klein or MOSS;
+- short quoted text;
+- the **Standard** size, then **Scale up** for screens.
+
+To make an existing picture sharper without redrawing it, use **Upscale ▾** instead; it can't change the words.
 
 **To place things exactly (MOSS)**, open **Start from ▾ > Layout boxes**:
 1. Drag boxes on the canvas.
@@ -230,6 +238,7 @@ It makes one small picture through the app and writes `selftest-result.json`.
   - Windows Firewall allows the app on private networks.
 
   The page uses plain HTTP, so only use it on networks you trust or through the tunnel.
+- **The words come out misspelled.** If the text check still can't get them right in 3 tries, it keeps the closest one and tells you what it read. Try Qwen Image, shorten the quoted text, or make it at Standard size. The check needs the Qwen3-VL files that come with Qwen Image; without them it uses Qwen 3.5, which is less exact.
 - **A style LoRA does nothing or makes a mess.** It was probably made for a different model. Use it only with the model it was made for.
 - **An engine update failed its test.** The app puts the previous version back automatically and says so. Nothing else is needed; try again after the next release.
 - **A Qwen edit looks over-brightened or harsh.** This happens with very dark pictures. Use MOSS or FLUX for those.

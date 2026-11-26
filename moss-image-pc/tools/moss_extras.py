@@ -76,7 +76,8 @@ def base_spec(app, model, prompt, w, h, screen=None, shape="", tier="", label=""
                 save_txt=s.get("save_txt", True), authors=s.get("authors", ""), copyright=s.get("copyright", ""),
                 tags=M.split_tags(s.get("tags", "MOSS-Image")), screen=screen, shape=shape, tier=tier,
                 upscale=bool(screen), split=bool(screen) and len(screen["parts"]) > 1,
-                ai_upscale=bool(screen) and G().UPSCALER.exists(), adv=app.advanced_for(model), label=label)
+                ai_upscale=bool(screen) and G().UPSCALER.exists(), adv=app.advanced_for(model), label=label,
+                text_check=s.get("text_check", True) and bool(D.quoted_text(prompt)))
 
 
 def size_for(app, model, shape_or_screen, tier_index):

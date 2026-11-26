@@ -22,7 +22,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageFilter, ImageTk
 Image.MAX_IMAGE_PIXELS = 250_000_000      # big AI-upscaled copies of our own pictures are fine
 
 import moss_cloud as C
@@ -31,7 +31,7 @@ import moss_meta as M
 import moss_updates as U
 import moss_extras as X
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -329,6 +329,7 @@ def write_txt(final, job):
         pass
 
 
+TEXT_TRIES = 3                    # text check: how many pictures to make at most when the words come out wrong
 UPSCALE_MAX_SIDE = 16384          # the engine refuses 4x results bigger than this per side...
 UPSCALE_MAX_PIXELS = 64_000_000   # ...or than 64 megapixels
 UPSCALE_TILE = 1000               # bigger pictures are done in pieces this size (4000 px out)
@@ -412,9 +413,30 @@ def upscale_picture(src, factor, say):
     return out
 
 
+def keep_unpainted(raw, src, mask):
+    """Paint-to-edit: put the original picture's pixels back everywhere outside the painted area, so text and
+    details there stay exactly as they were. The join is softened only inside the painted area."""
+    with Image.open(raw) as g:
+        made = g.convert("RGB")
+    with Image.open(src) as o:
+        original = o.convert("RGB")
+    with Image.open(mask) as m:
+        painted = m.convert("L")
+    if original.size != made.size:
+        original = original.resize(made.size, Image.Resampling.LANCZOS)
+    if painted.size != made.size:
+        painted = painted.resize(made.size, Image.Resampling.BILINEAR)
+    painted = painted.point(lambda v: 255 if v >= 128 else 0)
+    soft = painted.filter(ImageFilter.MinFilter(7)).filter(ImageFilter.BoxBlur(3))   # stays inside the paint
+    Image.composite(made, original, soft).save(raw, "PNG", compress_level=1)
+
+
 def finish_files(job, say):
     """After the engine is done: scale up for screens, save with details, split per screen. Returns files."""
     raw, final, scr = job["raw"], job["final"], job.get("screen")
+    if job.get("mask") and job.get("edit_path"):
+        say("Keeping everything outside the painted area exactly as it was...")
+        keep_unpainted(raw, job["edit_path"], job["mask"])
     if scr and job["upscale"] and (scr["W"], scr["H"]) != (job["w"], job["h"]):
         source = raw
         if job.get("ai_upscale") and UPSCALER.exists() and scr["W"] > job["w"] * 1.05:
@@ -454,6 +476,22 @@ def finish_files(job, say):
     if job["save_txt"]:
         write_txt(final, job)
     return files
+
+
+def check_text(job, picture, say):
+    """Read the words back from a new picture and compare them with the quoted text in the prompt.
+    Returns dict(ok, score, seen, details), or None if the check couldn't run."""
+    expected = D.quoted_text(job["prompt"])
+    reader = D.text_reader(ROOT)
+    if not expected or not reader:
+        return None
+    say("Checking the words in the picture...")
+    try:
+        seen = D.read_text_local(ROOT, reader[0], reader[1], picture)
+    except Exception:
+        return None
+    ok, score, details = D.text_score(expected, seen)
+    return dict(ok=ok, score=score, seen=seen, details=details)
 
 
 # ---------------- the window ----------------
@@ -626,6 +664,7 @@ class Studio:
                  authors=self.authors.get(), copyright=self.copyright.get(), tags=self.tags.get(),
                  aspect=self.aspect.get(), tier=self.tier.get(), width=self.width.get(), height=self.height.get(),
                  upscale=self.upscale.get(), split=self.split.get(), theme=self.theme.get(),
+                 text_check=self.text_check.get(),
                  model=self.model_key, geometry=self.root.geometry())
         try:
             SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -694,6 +733,10 @@ class Studio:
         start_btn = ttk.Button(row4, text="Start from \u25be")
         start_btn.configure(command=lambda: X.start_from_menu(self, start_btn))
         start_btn.pack(side="left", padx=(4, 0))
+        self.text_check = tk.BooleanVar(value=True)
+        ttk.Checkbutton(box, text=f'Check that words in "quotes" come out right, and retry if not '
+                                  f'(up to {TEXT_TRIES} tries)', variable=self.text_check
+                        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.prompt.bind("<<Modified>>", self.on_prompt_change)
 
         # Size
@@ -977,6 +1020,7 @@ class Studio:
         self.out_dir.set(s.get("out_dir") or str(DEFAULT_OUT))
         self.fmt.set(s.get("fmt", "png"))
         self.save_txt.set(s.get("save_txt", True))
+        self.text_check.set(s.get("text_check", True))
         self.authors.set(s.get("authors", ""))
         self.copyright.set(s.get("copyright", ""))
         self.tags.set(s.get("tags", "MOSS-Image"))
@@ -1441,7 +1485,8 @@ class Studio:
                     screen=scr, shape=self.aspect.get(), tier=self.tier.get(),
                     upscale=bool(scr) and self.upscale.get(), split=bool(scr) and self.split.get(),
                     ai_upscale=bool(scr) and self.upscale.get() and self.ai_upscale.get() and UPSCALER.exists(),
-                    adv=adv, label="")
+                    adv=adv, label="",
+                    text_check=self.text_check.get() and not self.profile.get("cloud") and bool(D.quoted_text(prompt)))
 
     def memory_ok(self, spec):
         """Warn before a big job if Windows can't promise enough memory (see memory_advice)."""
@@ -1504,7 +1549,9 @@ class Studio:
                 settings += " with AI upscaling"
         src_name = Path(spec["edit_src"]).name if editing else None
         if editing:
-            settings += f", {'inpaint (painted area)' if mask else 'edit'} of {src_name}"
+            settings += f", {'inpaint (painted area; the rest kept exactly)' if mask else 'edit'} of {src_name}"
+        if spec.get("text_tries"):
+            settings += f", text check try {len(spec['text_tries']) + 1} of {TEXT_TRIES}"
         meta = dict(title=("Edit: " if editing else "") + auto_title(prompt),
                     subject=f"Edited from {src_name}" if editing else "", comment=prompt,
                     authors=spec["authors"], copyright=spec["copyright"], tags=spec["tags"], software=SOFTWARE,
@@ -1513,7 +1560,7 @@ class Studio:
                    tokens=tokens, save_txt=spec["save_txt"], when=when, meta=meta, profile=profile,
                    steps=steps, cfg=cfg, edit_src=src_name, screen=scr, shape=spec["shape"], tier=spec["tier"],
                    model=spec["model"], upscale=spec["upscale"], split=spec["split"], ai_upscale=spec["ai_upscale"],
-                   cancelled=False, spec=spec)
+                   mask=mask, edit_path=spec["edit_src"] if mask else None, cancelled=False, spec=spec)
         cmd = [str(SD_CLI)]
         files = dict(profile["files"])
         if use_edit:
@@ -1694,11 +1741,15 @@ class Studio:
             self.events.put(("done", (job, None, f"The engine stopped (code {code}).")))
             return
         self.events.put(("saving", job))
+        say = lambda msg: self.events.put(("status", msg))  # noqa: E731
         try:
-            files = finish_files(job, lambda msg: self.events.put(("status", msg)))
-            self.events.put(("done", (job, files, None)))
+            files = finish_files(job, say)
         except Exception as e:
             self.events.put(("done", (job, None, f"The picture was made but could not be saved: {e}")))
+            return
+        if (job.get("spec") or {}).get("text_check"):
+            job["text"] = check_text(job, files[0], say)
+        self.events.put(("done", (job, files, None)))
 
     def poll_events(self):
         try:
@@ -1778,9 +1829,14 @@ class Studio:
                 messagebox.showerror("MOSS Image Studio", message)
             self.after_job()
             return
-        secs = int(time.time() - self.started)
+        note = ""
+        if job.get("text") is not None:
+            files, note = self.after_text_check(job, files)
+            if files is None:                       # another try has started
+                return
+        secs = int(time.time() - spec.get("t0", self.started))
         extra = f" ({len(files) - 1} screen pictures too)" if len(files) > 1 else ""
-        self.status.configure(text=f"Done in {secs // 60}:{secs % 60:02d}.{extra}")
+        self.status.configure(text=f"Done in {secs // 60}:{secs % 60:02d}.{extra}{note}")
         self.progress["value"] = 100
         if not job.get("cloud"):     # cloud pictures have no seed to reuse
             self.settings.update(last_seed=job["seed"], last_w=job["w"], last_h=job["h"],
@@ -1790,6 +1846,40 @@ class Studio:
         self.show_picture(files[0])
         self.queue_result(spec, files[0], None)
         self.after_job()
+
+    def after_text_check(self, job, files):
+        """Text check: start another try if the words came out wrong, or keep the best try and delete the others.
+        Returns (files, status note), or (None, "") when another try has started."""
+        spec = job["spec"]
+        spec.setdefault("t0", self.started)
+        tries = spec.setdefault("text_tries", [])
+        tries.append(dict(job["text"], files=files, seed=job["seed"]))
+        if not job["text"]["ok"] and len(tries) < TEXT_TRIES:
+            wrong = ", ".join(f'"{d[1]}"' for d in job["text"]["details"] if d[2] < 1) or "nothing readable"
+            retry = dict(spec, seed="random", text_tries=tries, t0=spec["t0"])
+            if self.launch(retry, interactive=False):
+                self.status.configure(text=f"The words came out as {wrong[:80]}. Trying again "
+                                           f"({len(tries) + 1} of {TEXT_TRIES})...")
+                return None, ""
+        best = max(tries, key=lambda t: t["score"])
+        for t in tries:
+            if t is not best:
+                for f in t["files"]:
+                    for p in (Path(f), Path(f).with_suffix(".txt")):
+                        p.unlink(missing_ok=True)
+        n = len(tries)
+        if best["ok"]:
+            note = "  Words checked: correct" + (f" (try {tries.index(best) + 1} of {n})." if n > 1 else ".")
+        else:
+            seen = " / ".join(best["seen"])[:120] or "nothing readable"
+            note = f"  Words still not right after {n} tries; kept the closest."
+            if not spec.get("queued"):
+                messagebox.showinfo(
+                    "Text check", f"The words didn't come out exactly right in {n} tries. The closest one is shown; "
+                    f"it reads:\n\n{seen}\n\nQwen Image is the best of the models on this PC at text. "
+                    "Shorter quoted text and the Standard size also help.")
+        job["seed"] = best["seed"]                  # so "Variation (same seed)" uses the picture kept
+        return best["files"], note
 
     # ---------------- queue ----------------
     def queue_add(self, spec, label="", group=None):
@@ -2412,6 +2502,7 @@ def selftest(root, out_dir):
     app.fmt.set("png")
     app.seed_mode.set("number")
     app.seed_value.set("42")
+    app.text_check.set(False)
 
     def finish(status):
         result["status"] = status
