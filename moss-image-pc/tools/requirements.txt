@@ -1,2 +1,5 @@
 tokenizers==0.23.3
 pillow==13.0.0
+# macOS only: screens and desktop pictures (AppKit), and the Keychain for the Gemini key
+pyobjc-framework-Cocoa==13.1; sys_platform == "darwin"
+keyring==25.7.0; sys_platform == "darwin"

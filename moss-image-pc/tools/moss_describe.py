@@ -16,6 +16,7 @@ from pathlib import Path
 from PIL import Image
 
 import moss_cloud as C
+import moss_platform as P
 
 CLOUD_MODEL = "gemini-3.5-flash-lite"      # Google's fast, low-cost multimodal text model
 CLOUD_PRICE = "about $0.001 per picture"
@@ -63,7 +64,7 @@ def small_copy(path, longest=1536):
 
 def local_options(root):
     """Describers available on this PC: list of (label, model path, projector path)."""
-    llama = root / "llm-bin" / "llama-mtmd-cli.exe"
+    llama = root / "llm-bin" / P.exe("llama-mtmd-cli")
     if not llama.exists():
         return []
     models = root / "models"
@@ -76,7 +77,7 @@ def local_options(root):
 
 
 def describe_local(root, model, projector, picture, style="Detailed", timeout=300):
-    llama = root / "llm-bin" / "llama-mtmd-cli.exe"
+    llama = root / "llm-bin" / P.exe("llama-mtmd-cli")
     with tempfile.TemporaryDirectory() as tmp:
         img = Path(tmp) / "picture.jpg"
         img.write_bytes(small_copy(picture))
@@ -125,7 +126,7 @@ ENHANCE_LENGTH = {"Detailed": "80 to 150 words", "Short": "30 to 60 words"}
 
 def enhance_options(root):
     """Local text models for the enhancer: list of (label, model path)."""
-    if not (root / "llm-bin" / "llama-cli.exe").exists():
+    if not (root / "llm-bin" / P.exe("llama-cli")).exists():
         return []
     models = root / "models"
     candidates = [("Qwen 3.5 on this PC", models / "Qwen3.5-9B-Q4_K_M.gguf"),
@@ -146,7 +147,7 @@ def _reply_from_cli(stdout):
 
 
 def enhance_local(root, model, idea, style="Detailed", timeout=300):
-    cmd = [str(root / "llm-bin" / "llama-cli.exe"), "-m", str(model),
+    cmd = [str(root / "llm-bin" / P.exe("llama-cli")), "-m", str(model),
            "-sys", ENHANCE_SYSTEM.format(length=ENHANCE_LENGTH.get(style, ENHANCE_LENGTH["Detailed"])),
            "-p", idea, "-st", "-rea", "off", "-ngl", "99", "--temp", "0.7", "-n", "800", "-c", "4096",
            "--no-warmup", "--log-disable"]
@@ -195,7 +196,7 @@ def text_reader(root):
 
 def read_text_local(root, model, projector, picture, timeout=240):
     """The lines of text a local vision model reads in a picture ([] if none)."""
-    llama = root / "llm-bin" / "llama-mtmd-cli.exe"
+    llama = root / "llm-bin" / P.exe("llama-mtmd-cli")
     with tempfile.TemporaryDirectory() as tmp:
         img = Path(tmp) / "picture.jpg"
         img.write_bytes(small_copy(picture, 2048))
@@ -283,7 +284,7 @@ def locate_text(root, model, projector, picture, phrase, timeout=240):
     """Where a piece of text is in a picture: (x0, y0, x1, y1) in the picture's pixels, or None.
     Qwen3-VL answers in 0-1000 coordinates relative to the picture; numbers above 1000 are taken as pixels
     of the copy it was shown."""
-    llama = root / "llm-bin" / "llama-mtmd-cli.exe"
+    llama = root / "llm-bin" / P.exe("llama-mtmd-cli")
     with Image.open(picture) as im:
         W, H = im.size
     with tempfile.TemporaryDirectory() as tmp:

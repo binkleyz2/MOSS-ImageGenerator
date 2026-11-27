@@ -1,17 +1,18 @@
 """Nano Banana (Google Gemini image models) for MOSS Image Studio, using only the standard library.
 
-Requests go to Google's Interactions API with the user's own Gemini API key. The key is stored
-encrypted with Windows DPAPI, so only the same Windows account on the same PC can read it.
+Requests go to Google's Interactions API with the user's own Gemini API key. On Windows the key is stored
+encrypted with DPAPI (only the same Windows account on the same PC can read it); on a Mac it is kept in
+the Keychain (see moss_platform).
 Set MOSS_CLOUD_URL to point at a different endpoint (used for offline testing).
 """
 import base64
-import ctypes
 import json
 import math
 import os
 import urllib.error
 import urllib.request
-from ctypes import wintypes
+
+import moss_platform as P
 
 API_URL = os.environ.get("MOSS_CLOUD_URL", "https://generativelanguage.googleapis.com/v1beta/interactions")
 API_REVISION = "2026-05-20"
@@ -60,31 +61,19 @@ def crop_size(ow, oh, ratio):
     return ow, round(ow / ratio)
 
 
-# ---------------- API key (Windows DPAPI) ----------------
-
-class _Blob(ctypes.Structure):
-    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-
-def _dpapi(data, protect):
-    src = ctypes.create_string_buffer(data, len(data))
-    blob_in = _Blob(len(data), ctypes.cast(src, ctypes.POINTER(ctypes.c_char)))
-    blob_out = _Blob()
-    fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
-    if not fn(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
-        raise OSError("Windows could not " + ("encrypt" if protect else "decrypt") + " the API key")
-    try:
-        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
-    finally:
-        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
-
+# ---------------- API key (Windows DPAPI, or the macOS Keychain) ----------------
 
 def encrypt_key(key):
-    return base64.b64encode(_dpapi(key.encode("utf-8"), True)).decode("ascii")
+    """Keep the key safe; returns what goes in the settings file."""
+    return P.store_key(key)
 
 
 def decrypt_key(stored):
-    return _dpapi(base64.b64decode(stored), False).decode("utf-8")
+    return P.load_key(stored)
+
+
+def forget_key(stored):
+    P.forget_key(stored)
 
 
 def find_key(settings):

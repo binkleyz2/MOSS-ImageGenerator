@@ -1,8 +1,10 @@
-"""MOSS Image Studio: a window for making MOSS-Image pictures on this PC.
+"""MOSS Image Studio: a window for making MOSS-Image pictures on this computer (Windows, or a Mac with
+Apple Silicon).
 
-Start it with the "MOSS Image Studio" shortcut on the desktop, or:
-    tools\\venv\\Scripts\\pythonw.exe tools\\moss_gui.py
-It runs the same engine (bin\\sd-cli.exe) and models as "MOSS Image.bat".
+Start it with the "MOSS Image Studio" shortcut (or app), or:
+    Windows: tools\\venv\\Scripts\\pythonw.exe tools\\moss_gui.py
+    macOS:   tools/venv/bin/python tools/moss_gui.py
+It runs the image engine in bin (sd-cli) with the models in models.
 """
 import ctypes
 import json
@@ -15,7 +17,6 @@ import sys
 import tempfile
 import threading
 import time
-from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
@@ -28,10 +29,11 @@ Image.MAX_IMAGE_PIXELS = 250_000_000      # big AI-upscaled copies of our own pi
 import moss_cloud as C
 import moss_describe as D
 import moss_meta as M
+import moss_platform as P
 import moss_updates as U
 import moss_extras as X
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -42,14 +44,14 @@ def find_root():
         return Path(__file__).resolve().parent.parent
     exe_dir = Path(sys.executable).resolve().parent
     for folder in (exe_dir, exe_dir / "moss-image-pc", exe_dir.parent, exe_dir.parent / "moss-image-pc"):
-        if (folder / "bin" / "sd-cli.exe").exists():
+        if (folder / "bin" / P.exe("sd-cli")).exists():
             return folder
     return exe_dir
 
 
 ROOT = find_root()
 HERE = ROOT / "tools"
-SD_CLI = ROOT / "bin" / "sd-cli.exe"
+SD_CLI = ROOT / "bin" / P.exe("sd-cli")
 MODELS = ROOT / "models"
 TOKENIZER = MODELS / "tokenizer_qwen3.5.json"   # used for token counts (exact for MOSS, close for the others)
 SETTINGS_FILE = HERE / "gui_settings.json"
@@ -148,7 +150,7 @@ ASPECTS = {   # name: sizes for each tier; all multiples of 16 and within MAX_PI
     "21:9 ultrawide":  [(1536, 640), (2240, 960), (2944, 1264), (3440, 1440)],
 }
 CUSTOM = "Custom"
-THEMES = ["Match Windows", "Light", "Dark"]
+THEMES = [P.MATCH_SYSTEM, "Light", "Dark"]
 
 PROGRESS_RE = re.compile(r"\|[=\-> ]*\|\s*(\d+)/(\d+)\s*-\s*([\d.]+)\s*(it/s|s/it)")
 SETTINGS_RE = re.compile(r"(\d+)\s*x\s*(\d+).*?seed\s*(\d+)", re.I)
@@ -163,15 +165,36 @@ DARK = dict(bg="#1f2023", field="#2b2d31", fg="#e8e8e8", hint="#a0a4ab", error="
 
 # ---------------- helpers ----------------
 
-def estimate(w, h, profile=None, editing=False):
-    """Rough time on this PC (RTX 4070 Ti SUPER), from earlier runs."""
-    profile = profile or PROFILES[DEFAULT_PROFILE]
-    if profile.get("cloud"):
-        return "usually 10-40 s"
+SPEED = {}        # model key -> how much slower (>1) or faster this computer is than the reference PC
+
+
+def base_secs(w, h, profile, editing=False):
+    """Seconds on the reference PC (RTX 4070 Ti SUPER), from earlier runs."""
     steps = profile["edit"]["steps"] if editing and profile["edit"] else profile["steps"]
     secs = 10 + steps * profile["step_secs"] * ((w * h / 1e6) / 1.04) ** profile.get("size_power", 1.25)
     if editing and profile["edit"]:
         secs += profile["edit"].get("extra_secs", 0)
+    return secs
+
+
+def learn_speed(key, secs, w, h, editing=False):
+    """After a picture: remember how this computer's time compares with the reference PC's (slowly, so one
+    odd run doesn't swing it)."""
+    expected = base_secs(w, h, PROFILES[key], editing)
+    if secs > 3 and expected > 0:
+        ratio = max(0.2, min(50.0, secs / expected))
+        old = SPEED.get(key)
+        SPEED[key] = ratio if old is None else round(old * 0.6 + ratio * 0.4, 3)
+
+
+def estimate(w, h, profile=None, editing=False):
+    """Rough time on this computer: the reference PC's time, adjusted by what this computer has shown."""
+    profile = profile or PROFILES[DEFAULT_PROFILE]
+    if profile.get("cloud"):
+        return "usually 10-40 s"
+    key = next((k for k, p in PROFILES.items() if p is profile), None)
+    factor = SPEED.get(key) or (1.0 if P.IS_WIN else 6.0)          # a first guess for a Mac
+    secs = base_secs(w, h, profile, editing) * factor
     if secs < 50:
         return "under a minute"
     mins = secs / 60
@@ -213,36 +236,7 @@ def fit_size(full_w, full_h, target_pixels, max_side=MAX_SPAN_SIDE, align=16):
 
 def detect_screens():
     """Connected screens in real pixels: list of dicts with x, y, w, h, primary."""
-    user = ctypes.windll.user32
-    prev = None
-    try:   # ask for per-monitor pixel sizes, even though the window itself is only system-DPI aware
-        prev = user.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
-    except Exception:
-        pass
-
-    class MONITORINFOEXW(ctypes.Structure):
-        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
-                    ("dwFlags", wintypes.DWORD), ("szDevice", wintypes.WCHAR * 32)]
-
-    found = []
-    proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
-                                   ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
-
-    def callback(hmon, _hdc, _rect, _data):
-        info = MONITORINFOEXW()
-        info.cbSize = ctypes.sizeof(info)
-        if user.GetMonitorInfoW(hmon, ctypes.byref(info)):
-            r = info.rcMonitor
-            found.append(dict(x=r.left, y=r.top, w=r.right - r.left, h=r.bottom - r.top,
-                              primary=bool(info.dwFlags & 1)))
-        return True
-
-    try:
-        user.EnumDisplayMonitors(None, None, proc_type(callback), 0)
-    finally:
-        if prev:
-            user.SetThreadDpiAwarenessContext(ctypes.c_void_p(prev))
-    return sorted(found, key=lambda s: (s["x"], s["y"]))
+    return P.detect_screens()
 
 
 def screen_options(screens):
@@ -290,42 +284,26 @@ MEMORY_ERROR_RE = re.compile(r"capacity exceeded|out of memory|cannot make enoug
 
 
 def memory_free_gb():
-    """(free RAM, free commit) in GB, as Windows reports them; commit = what programs can still reserve."""
-    class MEMORYSTATUSEX(ctypes.Structure):
-        _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
-                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-    m = MEMORYSTATUSEX()
-    m.dwLength = ctypes.sizeof(m)
-    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
-        return None, None
-    return m.ullAvailPhys / 2**30, m.ullAvailPageFile / 2**30
+    """(free RAM, what programs can still get) in GB (see moss_platform.memory_free_gb)."""
+    return P.memory_free_gb()
 
 
 def memory_advice(job):
     ram, commit = memory_free_gb()
-    mem = (f"Right now Windows has {ram:.0f} GB of RAM free and can promise programs "
-           f"{commit:.0f} GB more memory in total.\n\n") if ram is not None else ""
+    if ram is None:
+        mem = ""
+    elif P.IS_WIN:
+        mem = (f"Right now Windows has {ram:.0f} GB of RAM free and can promise programs "
+               f"{commit:.0f} GB more memory in total.\n\n")
+    else:
+        mem = f"Right now about {commit:.0f} GB of this Mac's memory is free for pictures.\n\n"
     return (f"{job['profile']['name']} ran out of memory at {job['w']} x {job['h']} "
             f"({job['w'] * job['h'] / 1e6:.1f} MP), so no picture was made.\n\n{mem}"
             "What helps:\n"
             "  - Choose a smaller Size (Standard ~1 MP needs the least).\n"
             "  - Close other big programs.\n"
-            "  - Restart Windows if it has been running for days: some Windows services slowly hold on "
-            "to more and more memory, and a restart frees it.\n"
+            + P.memory_tips() +
             "  - Or use another model: FLUX.2 Klein needs the least memory.")
-
-
-def windows_uses_dark():
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
-            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
-    except OSError:
-        return False
 
 
 def write_txt(final, job):
@@ -590,7 +568,7 @@ def redraw_area(full, box, words, prompt, key, seed, workdir, on_proc=None, stre
     for option, rel in profile["files"].items():
         cmd += [option, str(MODELS / rel)]
     cmd += ["--cfg-scale", str(profile["cfg"]), "--steps", str(profile["steps"]), "-W", str(rw), "-H", str(rh),
-            "-s", str(seed), "--offload-to-cpu", "-i", str(init), "--mask", str(mask_file), "--strength", str(strength),
+            "-s", str(seed), *P.OFFLOAD_ARGS, "-i", str(init), "--mask", str(mask_file), "--strength", str(strength),
             "-p", text, "-o", str(out)]
     if profile["sampler"]:
         cmd += ["--sampling-method", profile["sampler"]]
@@ -690,12 +668,17 @@ class Studio:
         root.minsize(1100, 900)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         try:
-            root.iconbitmap(default=str(RESOURCES / "moss.ico"))
-        except tk.TclError:
+            if P.IS_WIN:
+                root.iconbitmap(default=str(RESOURCES / "moss.ico"))
+            else:                                   # macOS: the Dock icon
+                with Image.open(RESOURCES / "moss.ico") as im:
+                    self.icon = ImageTk.PhotoImage(im.convert("RGBA").resize((256, 256)))
+                root.iconphoto(True, self.icon)
+        except (tk.TclError, OSError):
             pass
         self.style = ttk.Style()
 
-        self.theme = tk.StringVar(value=self.settings.get("theme", "Match Windows"))
+        self.theme = tk.StringVar(value=self.settings.get("theme", P.MATCH_SYSTEM))
         body = ttk.Frame(root)
         body.pack(fill="both", expand=True)
         self.body = body
@@ -722,7 +705,7 @@ class Studio:
         def work():
             found = []
             try:
-                items = ([U.check_app(__version__)] if FROZEN else []) + U.check_engines(ROOT, lambda m: None)
+                items = ([U.check_app(__version__)] if U.can_update_app() else []) + U.check_engines(ROOT, lambda m: None)
                 found = [U.item_name(it) + f" {it.get('tag')}" for it in items if it["status"] == "update"]
             except Exception:
                 pass
@@ -757,14 +740,16 @@ class Studio:
         if not SD_CLI.exists():
             text = ("The image engine was not found, so pictures can't be made yet.\n\n"
                     f"Looked in: {ROOT}\nMissing:\n{names}\n\n"
-                    "Run installer-moss-image.ps1 first. Then put MOSS Image Studio.exe in the "
-                    "moss-image-pc folder it creates (next to the bin and models folders), "
-                    "or in the folder that holds moss-image-pc.")
+                    + ("Run installer-moss-image.ps1 first. Then put MOSS Image Studio.exe in the "
+                       "moss-image-pc folder it creates (next to the bin and models folders), "
+                       "or in the folder that holds moss-image-pc." if P.IS_WIN else
+                       "Run install-mac.sh first (see the README)."))
         else:
             what = "editing pictures with" if edit else "using"
             text = (f"Some files needed for {what} {self.profile['name']} aren't downloaded yet.\n\n"
                     f"Missing:\n{names}\n\n"
-                    "Run download-models.ps1 (next to the installer) to get them, "
+                    + ("Run download-models.ps1 (next to the installer) to get them, " if P.IS_WIN else
+                       "Run ./download-models.sh to get them, ") +
                     "or choose another model.")
         messagebox.showwarning("MOSS Image Studio", text + "\n\nYou can still open pictures and edit their details.")
         return False
@@ -777,7 +762,7 @@ class Studio:
 
     # ---------------- Nano Banana (cloud) API key ----------------
     def edit_api_key(self):
-        """Ask for the Gemini API key. It is stored encrypted for this Windows account only."""
+        """Ask for the Gemini API key. Windows keeps it encrypted for this account; a Mac keeps it in the Keychain."""
         win = tk.Toplevel(self.root)
         win.title("Gemini API key")
         win.transient(self.root)
@@ -790,7 +775,8 @@ class Studio:
         env = bool(os.environ.get("GEMINI_API_KEY", "").strip())
         text = ("Nano Banana runs on Google's servers and is billed to your own Gemini API key.\n"
                 f"Get a key at {C.KEY_PAGE} (billing must be turned on for image generation).\n\n"
-                "The key is saved encrypted, readable only by your Windows account on this PC.")
+                + ("The key is saved encrypted, readable only by your Windows account on this PC." if P.IS_WIN else
+                   "The key is kept in your Mac's Keychain."))
         if env:
             text += "\n\nThe GEMINI_API_KEY environment variable is set; it is used instead of a saved key."
         ttk.Label(frame, text=text, wraplength=460, justify="left").grid(row=0, column=0, columnspan=3, sticky="w")
@@ -817,7 +803,7 @@ class Studio:
             win.destroy()
 
         def remove():
-            self.settings.pop("gemini_key", None)
+            C.forget_key(self.settings.pop("gemini_key", None))
             self.save_settings()
             self.refresh_model_list()
             win.destroy()
@@ -845,7 +831,7 @@ class Studio:
                  authors=self.authors.get(), copyright=self.copyright.get(), tags=self.tags.get(),
                  aspect=self.aspect.get(), tier=self.tier.get(), width=self.width.get(), height=self.height.get(),
                  upscale=self.upscale.get(), split=self.split.get(), theme=self.theme.get(),
-                 text_check=self.text_check.get(),
+                 text_check=self.text_check.get(), speed=dict(SPEED),
                  model=self.model_key, geometry=self.root.geometry())
         try:
             SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -897,7 +883,7 @@ class Studio:
                    ).pack(side="right", padx=4)
         self.edit_row.grid_remove()
 
-        self.prompt = self.make_text(box, height=8, width=58, wrap="word", font=("Segoe UI", 10), undo=True)
+        self.prompt = self.make_text(box, height=8, width=58, wrap="word", font=(P.UI_FONT, 10), undo=True)
         sb = ttk.Scrollbar(box, command=self.prompt.yview)
         self.prompt.configure(yscrollcommand=sb.set)
         self.prompt.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
@@ -1085,7 +1071,7 @@ class Studio:
             ttk.Entry(ed, textvariable=var).grid(row=r, column=1, sticky="we", padx=(8, 0), pady=1)
             self.meta_vars[key] = var
         ttk.Label(ed, text="Comment").grid(row=len(rows), column=0, sticky="nw", pady=(3, 0))
-        self.comment = self.make_text(ed, height=4, wrap="word", font=("Segoe UI", 9))
+        self.comment = self.make_text(ed, height=4, wrap="word", font=(P.UI_FONT, 9))
         self.comment.grid(row=len(rows), column=1, sticky="we", padx=(8, 0), pady=(3, 0))
         ed.columnconfigure(1, weight=1)
         eb = ttk.Frame(ed)
@@ -1112,12 +1098,12 @@ class Studio:
         more_btn = ttk.Button(lg, text="More \u25be")
         more_btn.configure(command=lambda: X.more_menu(self, more_btn))
         more_btn.pack(side="right", padx=(0, 16))
-        self.log = self.make_text(right, height=8, wrap="none", font=("Consolas", 8), state="disabled")
+        self.log = self.make_text(right, height=8, wrap="none", font=(P.MONO_FONT, 8), state="disabled")
 
     # ---------------- theme ----------------
     def apply_theme(self):
         choice = self.theme.get()
-        dark = choice == "Dark" or (choice == "Match Windows" and windows_uses_dark())
+        dark = choice == "Dark" or (choice == P.MATCH_SYSTEM and P.uses_dark())
         st = self.style
         if dark:
             c = self.colors = DARK
@@ -1158,12 +1144,12 @@ class Studio:
             self.root.configure(background=c["bg"])
         else:
             c = self.colors = LIGHT
-            st.theme_use("vista" if "vista" in st.theme_names() else "clam")
-            self.root.configure(background="SystemButtonFace")
-        st.configure("Go.TButton", font=("Segoe UI", 11, "bold"), padding=(18, 8))
+            st.theme_use(next(t for t in P.LIGHT_THEMES + ["default"] if t in st.theme_names()))
+            self.root.configure(background=P.WINDOW_BG)
+        st.configure("Go.TButton", font=(P.UI_FONT, 11, "bold"), padding=(18, 8))
         st.configure("Hint.TLabel", foreground=c["hint"])
-        st.configure("Status.TLabel", font=("Segoe UI", 10, "bold"))
-        st.configure("Title.TLabel", font=("Segoe UI", 12, "bold"))
+        st.configure("Status.TLabel", font=(P.UI_FONT, 10, "bold"))
+        st.configure("Title.TLabel", font=(P.UI_FONT, 12, "bold"))
         self.texts = [t for t in self.texts if t.winfo_exists()]      # drop boxes from closed windows
         for t in self.texts:
             t.configure(background=c["text_bg"], foreground=c["text_fg"], insertbackground=c["text_fg"],
@@ -1173,8 +1159,8 @@ class Studio:
             try:
                 pop = self.root.tk.call("ttk::combobox::PopdownWindow", cb)
                 self.root.tk.call(f"{pop}.f.l", "configure", "-background", c["text_bg"], "-foreground", c["text_fg"],
-                                  "-selectbackground", c["select"] if dark else "SystemHighlight",
-                                  "-selectforeground", c["text_fg"] if dark else "SystemHighlightText")
+                                  "-selectbackground", c["select"] if dark else P.SELECT_BG,
+                                  "-selectforeground", c["text_fg"] if dark else P.SELECT_FG)
             except tk.TclError:
                 pass
         self.update_size_label()
@@ -1204,6 +1190,7 @@ class Studio:
         self.fmt.set(s.get("fmt", "png"))
         self.save_txt.set(s.get("save_txt", True))
         self.text_check.set(s.get("text_check", True))
+        SPEED.update(s.get("speed", {}))
         self.authors.set(s.get("authors", ""))
         self.copyright.set(s.get("copyright", ""))
         self.tags.set(s.get("tags", "MOSS-Image"))
@@ -1599,12 +1586,10 @@ class Studio:
             self.out_dir.set(str(Path(folder)))
 
     def open_path(self, path):
-        if path and Path(path).exists():
-            os.startfile(path)
+        P.open_path(path)
 
     def show_in_folder(self):
-        if self.current:
-            subprocess.Popen(["explorer", "/select,", str(self.current)])
+        P.show_in_folder(self.current)
 
     # ---------------- making a picture ----------------
     def start(self):
@@ -1674,7 +1659,7 @@ class Studio:
                     text_check=self.text_check.get() and (bool(D.quoted_text(prompt)) or (editing and not mask)))
 
     def memory_ok(self, spec):
-        """Warn before a big job if Windows can't promise enough memory (see memory_advice)."""
+        """Warn before a big job if the computer can't promise enough memory (see memory_advice)."""
         profile = PROFILES[spec["model"]]
         if profile.get("cloud"):
             return True
@@ -1684,9 +1669,11 @@ class Studio:
         if commit is None or commit >= need:
             return True
         return messagebox.askyesno(
-            "Low memory", f"Windows can only promise programs {commit:.0f} GB more memory right now, and "
-            f"{profile['name']} at {spec['w']} x {spec['h']} usually needs about {need:.0f} GB, so it may fail.\n\n"
-            "Restarting Windows usually fixes this if it has been running for days. "
+            "Low memory", (f"Windows can only promise programs {commit:.0f} GB more memory right now" if P.IS_WIN
+                           else f"Only about {commit:.0f} GB of this Mac's memory is free for pictures right now") +
+            f", and {profile['name']} at {spec['w']} x {spec['h']} usually needs about {need:.0f} GB, so it may "
+            "fail.\n\n" + ("Restarting Windows usually fixes this if it has been running for days. " if P.IS_WIN
+                            else "Quitting other apps frees memory. ") +
             "A smaller size or FLUX needs less.\n\nTry anyway?")
 
     def launch(self, spec, interactive=True):
@@ -1755,7 +1742,7 @@ class Studio:
         for option, rel in files.items():
             cmd += [option, str(MODELS / rel)]
         cmd += ["--cfg-scale", str(cfg), "--steps", str(steps),
-                "-H", str(h), "-W", str(w), "-s", str(seed), "--offload-to-cpu"]
+                "-H", str(h), "-W", str(w), "-s", str(seed), *P.OFFLOAD_ARGS]
         sampler = adv["sampler"] if not use_edit else profile["sampler"]
         if sampler:
             cmd += ["--sampling-method", sampler]
@@ -1774,6 +1761,7 @@ class Studio:
         cmd += ["-p", engine_prompt, "-o", str(job["raw"])]
         self.begin_ui(f"Starting: {w} x {h}, seed {seed}..." + (f"  [{spec['label']}]" if spec["label"] else ""))
         try:
+            job["t_engine"] = time.time()
             job["proc"] = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except OSError as e:
@@ -1923,6 +1911,8 @@ class Studio:
                 if line:
                     self.events.put(("line", line))
         code = proc.wait()
+        if code == 0 and job.get("t_engine"):
+            job["engine_secs"] = time.time() - job["t_engine"]
         if job["cancelled"]:
             job["raw"].unlink(missing_ok=True)
             self.events.put(("done", (job, None, None)))
@@ -2033,6 +2023,9 @@ class Studio:
         extra = f" ({len(files) - 1} screen pictures too)" if len(files) > 1 else ""
         self.status.configure(text=f"Done in {secs // 60}:{secs % 60:02d}.{extra}{note}")
         self.progress["value"] = 100
+        if job.get("engine_secs") and not job.get("fix"):
+            learn_speed(job["model"], job["engine_secs"], job["w"], job["h"],
+                        bool(spec.get("editing")) and not spec.get("mask"))
         if not job.get("cloud"):     # cloud pictures have no seed to reuse
             self.settings.update(last_seed=job["seed"], last_w=job["w"], last_h=job["h"],
                                  last_shape=job["shape"], last_tier=job["tier"], last_model=job["model"])
@@ -2442,7 +2435,7 @@ class Studio:
         go.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 0))
         status = ttk.Label(f, text="", style="Hint.TLabel", wraplength=420)
         status.grid(row=3, column=2, sticky="w", pady=(12, 0))
-        result = self.make_text(f, height=9, width=70, wrap="word", font=("Segoe UI", 10))
+        result = self.make_text(f, height=9, width=70, wrap="word", font=(P.UI_FONT, 10))
         result.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
         self.apply_theme_to_text(result)
         f.rowconfigure(4, weight=1)
@@ -2625,7 +2618,7 @@ class Studio:
         def check_worker():
             try:
                 say = lambda m: q.put(("status", m))
-                items = ([U.check_app(__version__)] if FROZEN else []) + U.check_engines(ROOT, say) \
+                items = ([U.check_app(__version__)] if U.can_update_app() else []) + U.check_engines(ROOT, say) \
                     + U.check_models(ROOT, say)
                 q.put(("checked", items))
             except Exception as e:
@@ -2651,7 +2644,7 @@ class Studio:
                     return False
             options = D.local_options(ROOT)
             if not options:
-                return (ROOT / "llm-bin" / "llama-mtmd-cli.exe").exists()
+                return (ROOT / "llm-bin" / P.exe("llama-mtmd-cli")).exists()
             sample = Path(tempfile.mkdtemp(prefix="moss-selftest-")) / "red.png"
             Image.new("RGB", (256, 256), (200, 30, 30)).save(sample)
             try:
@@ -2797,7 +2790,7 @@ def selftest(root, out_dir):
 
 
 def wallpaper_of_the_day(root):
-    """Run by Windows Task Scheduler: make today's wallpaper without showing the window, set it, and quit."""
+    """Run by Task Scheduler (Windows) or launchd (macOS): make today's wallpaper without showing the window, set it, and quit."""
     root.withdraw()
     app = Studio(root, check=False)
     log = HERE / "wallpaper-of-the-day.log"
@@ -2817,10 +2810,7 @@ def wallpaper_of_the_day(root):
 
 
 def main():
-    try:  # sharp text on high-DPI screens
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        pass
+    P.make_dpi_aware()
     root = tk.Tk()
     if len(sys.argv) == 3 and sys.argv[1] == "--selftest":
         selftest(root, sys.argv[2])

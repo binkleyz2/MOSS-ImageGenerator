@@ -13,11 +13,17 @@ All network and disk work here is meant to run in a worker thread; progress is r
 import hashlib
 import json
 import os
+import re
 import shutil
+import stat
+import tarfile
 import time
 import urllib.error
 import urllib.request
 import zipfile
+from pathlib import Path
+
+import moss_platform as P
 
 HF = "https://huggingface.co/"
 UA = {"User-Agent": "MOSS-Image-Studio-updater"}
@@ -42,14 +48,35 @@ MODEL_SOURCES = {
     "qwen-image-2.1/mmproj-Qwen3VL-8B-Instruct-F16.gguf": "Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-8B-Instruct-F16.gguf",
 }
 
+# Each engine's downloads for this system, as regular expressions over a release's file names.
+# Windows: CUDA 12 builds (plus the CUDA runtime for the image engine). macOS: Apple Silicon (Metal) builds;
+# the image engine's file name includes the macOS version it was built on, so any version matches.
+if P.IS_WIN:
+    _SD_FILES = lambda tag: [rf"sd-master-{re.escape(tag.rsplit('-', 1)[-1])}-bin-win-cuda12-x64\.zip",  # noqa: E731
+                             r"cudart-sd-bin-win-cu12-x64\.zip"]
+    _LLAMA_FILES = lambda tag: [rf"llama-{re.escape(tag)}-bin-win-cuda-12\.4-x64\.zip"]  # noqa: E731
+else:
+    _SD_FILES = lambda tag: [rf"sd-master-{re.escape(tag.rsplit('-', 1)[-1])}-bin-Darwin-macOS-[\d.]+-arm64\.zip"]  # noqa: E731
+    _LLAMA_FILES = lambda tag: [rf"llama-{re.escape(tag)}-bin-macos-arm64\.tar\.gz"]  # noqa: E731
+
 ENGINES = {
     "sd": dict(name="Image engine (stable-diffusion.cpp)", repo="leejet/stable-diffusion.cpp", folder="bin",
-               assets=lambda tag: [f"sd-master-{tag.rsplit('-', 1)[-1]}-bin-win-cuda12-x64.zip",
-                                   "cudart-sd-bin-win-cu12-x64.zip"]),
+               files=_SD_FILES, program="sd-cli"),
     "llama": dict(name="Describer engine (llama.cpp)", repo="ggml-org/llama.cpp", folder="llm-bin",
                   prereleases=True,          # llama.cpp marks its regular bNNNNN builds as pre-releases
-                  assets=lambda tag: [f"llama-{tag}-bin-win-cuda-12.4-x64.zip"]),
+                  files=_LLAMA_FILES, program="llama-mtmd-cli"),
 }
+
+
+def pick_assets(key, tag, assets):
+    """The release files this system needs for an engine (list of asset dicts), or None if any is missing."""
+    chosen = []
+    for pattern in ENGINES[key]["files"](tag):
+        match = next((a for n, a in sorted(assets.items(), reverse=True) if re.fullmatch(pattern, n)), None)
+        if not match:
+            return None
+        chosen.append(match)
+    return chosen
 CUDA_DLLS = ["cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll"]   # llama.cpp borrows these from bin\
 
 
@@ -201,17 +228,17 @@ def latest_release(key):
         if rel.get("draft") or (rel.get("prerelease") and not eng.get("prereleases")) or _tag_number(tag) < 0:
             continue
         assets = {a["name"]: a for a in rel.get("assets", [])}
-        if all(n in assets for n in eng["assets"](tag)) and (best is None or _tag_number(tag) > _tag_number(best[0])):
+        if pick_assets(key, tag, assets) and (best is None or _tag_number(tag) > _tag_number(best[0])):
             best = (tag, assets)
     if not best:
-        raise IOError("no recent release has the Windows CUDA files")
+        raise IOError(f"no recent release has the {'Windows CUDA' if P.IS_WIN else 'macOS Apple Silicon'} files")
     return best
 
 
 def install_item(key):
     """An update item for installing an engine that isn't on this PC yet (e.g. the describer)."""
     tag, assets = latest_release(key)
-    files = [assets[n] for n in ENGINES[key]["assets"](tag)]
+    files = pick_assets(key, tag, assets)
     return dict(key=key, status="update", mine=None, tag=tag, assets=files,
                 size=sum(a["size"] for a in files), detail="")
 
@@ -225,11 +252,10 @@ def check_engines(root, say):
         mine = installed_tag(root, key)
         try:
             tag, assets = latest_release(key)
-            wanted = eng["assets"](tag)
-            files = [assets.get(n) for n in wanted]
-            if not all(files):
+            files = pick_assets(key, tag, assets)
+            if not files:
                 results.append(dict(key=key, status="error", mine=mine, tag=tag, size=0,
-                                    detail="the new release doesn't have the Windows CUDA files yet"))
+                                    detail="the new release doesn't have the files for this computer yet"))
                 continue
             newer = mine is None or _tag_number(tag) > _tag_number(mine)
             size = sum(a["size"] for a in files if a["name"] != "cudart-sd-bin-win-cu12-x64.zip")
@@ -260,19 +286,20 @@ def update_engine(root, item, say):
         zip_path = staging / name
         _download(asset["browser_download_url"], zip_path, asset["size"], digest, say, name)
         say(f"Unpacking {name}...")
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(new)
+        unpack(zip_path, new)
     if key == "llama":
         for d in CUDA_DLLS:
             if (root / "bin" / d).exists():
                 shutil.copy2(root / "bin" / d, new / d)
-    exe = "sd-cli.exe" if key == "sd" else "llama-mtmd-cli.exe"
+    exe = P.exe(eng["program"])
     if not (new / exe).exists():
         found = next(new.rglob(exe), None)
         if not found:
             raise IOError(f"{exe} wasn't in the download")
         for p in found.parent.iterdir():
             shutil.move(str(p), str(new / p.name))
+    if not P.IS_WIN:
+        make_runnable(new)
     old_build = (folder / "build.txt").read_text(encoding="utf-8").split() if (folder / "build.txt").exists() else []
     prefix = [w for w in old_build if not (w.startswith("master-") or (w.startswith("b") and w[1:].isdigit()))]
     (new / "build.txt").write_text(" ".join(prefix + [item["tag"]]) + "\r\n", encoding="utf-8")
@@ -282,6 +309,33 @@ def update_engine(root, item, say):
         os.replace(folder, previous)
     os.replace(new, folder)
     shutil.rmtree(staging, ignore_errors=True)
+
+
+def unpack(archive, dest):
+    """Unpack a .zip or .tar.gz download (refusing paths that would land outside dest)."""
+    dest = Path(dest).resolve()
+    if str(archive).endswith((".tar.gz", ".tgz")):
+        with tarfile.open(archive) as t:
+            for m in t.getmembers():
+                if not (dest / m.name).resolve().is_relative_to(dest):
+                    raise IOError(f"unsafe path in the download: {m.name}")
+            t.extractall(dest, filter="data") if hasattr(tarfile, "data_filter") else t.extractall(dest)
+        return
+    with zipfile.ZipFile(archive) as z:
+        for info in z.infolist():
+            if not (dest / info.filename).resolve().is_relative_to(dest):
+                raise IOError(f"unsafe path in the download: {info.filename}")
+            z.extract(info, dest)
+            mode = info.external_attr >> 16                  # zip keeps Unix permissions here
+            if mode and not info.is_dir():
+                os.chmod(dest / info.filename, mode & 0o777)
+
+
+def make_runnable(folder):
+    """macOS: programs and libraries in an engine folder must be executable."""
+    for p in Path(folder).rglob("*"):
+        if p.is_file() and (p.suffix in ("", ".dylib", ".so", ".sh") and not p.name.endswith(".txt")):
+            p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def can_undo(root, key):
@@ -319,6 +373,9 @@ def _gh():
     found = shutil.which("gh")
     if found:
         return found
+    for p in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh"):          # Homebrew (apps opened from the Dock
+        if os.path.exists(p):                                         # don't get the shell's PATH)
+            return p
     for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("LOCALAPPDATA", "")):
         p = os.path.join(base, "GitHub CLI", "gh.exe")
         if base and os.path.exists(p):
@@ -367,13 +424,57 @@ def _exe():
     return os.path.abspath(sys.executable)
 
 
+def source_checkout():
+    """The git checkout this copy runs from (the folder holding .git), or None (e.g. the packaged .exe)."""
+    import sys
+    if getattr(sys, "frozen", False):
+        return None
+    folder = Path(__file__).resolve().parent
+    for up in (folder, *folder.parents):
+        if (up / ".git").exists():
+            return up
+    return None
+
+
+def can_update_app():
+    import sys
+    return getattr(sys, "frozen", False) or source_checkout() is not None
+
+
+def _git():
+    return shutil.which("git") or next((p for p in ("/opt/homebrew/bin/git", "/usr/bin/git") if os.path.exists(p)),
+                                       "git")
+
+
 def update_app(item, say):
-    """Download the new .exe and put it in place of the running one (Windows allows renaming a running .exe;
+    """Update this app to the release in `item`: a new .exe on Windows, or git pull in a source checkout."""
+    repo = source_checkout()
+    if repo is not None:
+        import subprocess
+        say(f"Updating MOSS Image Studio to {item['tag']} (git pull)...")
+        gh = _gh()
+        env = dict(os.environ)
+        if gh:          # let git use the GitHub CLI's sign-in for the private repo
+            env["GIT_CONFIG_COUNT"] = "2"
+            env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"] = "credential.https://github.com.helper", ""
+            env["GIT_CONFIG_KEY_1"] = "credential.https://github.com.helper"
+            env["GIT_CONFIG_VALUE_1"] = f"!'{gh}' auth git-credential"
+        run = subprocess.run([_git(), "-C", str(repo), "pull", "--ff-only"], capture_output=True, text=True,
+                             env=env, timeout=600, creationflags=P.NO_WINDOW)
+        if run.returncode != 0:
+            raise IOError((run.stderr or run.stdout).strip().splitlines()[-1] if (run.stderr or run.stdout)
+                          else "git pull failed")
+        return
+    _update_exe(item, say)
+
+
+def _update_exe(item, say):
+    """Windows: download the new .exe and put it in place of the running one (Windows allows renaming a running .exe;
     the old one is kept as MOSS-Image-Studio.old.exe until the next start)."""
     import sys
     import tempfile
     if not getattr(sys, "frozen", False):
-        raise IOError("this copy runs from source; update it with git pull")
+        raise IOError("this copy runs from source and isn't a git checkout; update it by hand")
     exe = _exe()
     folder = os.path.dirname(exe)
     tmp = tempfile.mkdtemp(prefix="moss-app-", dir=folder)

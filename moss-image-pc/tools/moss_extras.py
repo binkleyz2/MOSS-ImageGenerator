@@ -6,7 +6,6 @@ Every function takes the running Studio window (`app`) and uses its settings, mo
 import json
 import os
 import queue
-import subprocess
 import sys
 import threading
 import time
@@ -21,11 +20,11 @@ from PIL import Image, ImageDraw, ImageTk
 import moss_cloud as C
 import moss_describe as D
 import moss_meta as M
+import moss_platform as P
 
 SAMPLERS = ["", "euler", "euler_a", "heun", "dpm2", "dpm++2s_a", "dpm++2m", "dpm++2mv2", "ipndm", "ipndm_v",
             "lcm", "ddim_trailing", "tcd"]
 MOSS_NEGATIVE = "nsfw, worst quality, bad anatomy, watermark, jpeg artifact"    # MOSS's own recommendation
-TASK_NAME = "MOSS Image Studio - wallpaper of the day"
 
 
 def G():
@@ -104,7 +103,7 @@ def open_enhance(app):
                       "Longer prompts usually give better pictures, especially with MOSS.",
               wraplength=560, justify="left").grid(row=0, column=0, columnspan=3, sticky="w")
     ttk.Label(f, text="Idea").grid(row=1, column=0, sticky="nw", pady=(10, 0))
-    src = app.make_text(f, height=3, width=66, wrap="word", font=("Segoe UI", 10))
+    src = app.make_text(f, height=3, width=66, wrap="word", font=(P.UI_FONT, 10))
     src.grid(row=1, column=1, columnspan=2, sticky="we", pady=(10, 0))
     src.insert("1.0", idea)
     app.apply_theme_to_text(src)
@@ -126,7 +125,7 @@ def open_enhance(app):
                        "Tip: the local enhancer needs llama.cpp; get it from 'From a picture...' first.",
                        style="Hint.TLabel", wraplength=380)
     status.grid(row=4, column=2, sticky="w", pady=(10, 0))
-    out = app.make_text(f, height=8, width=66, wrap="word", font=("Segoe UI", 10))
+    out = app.make_text(f, height=8, width=66, wrap="word", font=(P.UI_FONT, 10))
     out.grid(row=5, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
     app.apply_theme_to_text(out)
     f.columnconfigure(2, weight=1)
@@ -242,7 +241,7 @@ def fix_words_dialog(app):
     ttk.Label(f, text="What should the words say? One line for each piece of text, exactly as it should read. "
                       "Only the wrong words are redrawn; the rest of the picture stays exactly as it is, and the "
                       "result is saved as a new copy.", wraplength=520, justify="left").pack(anchor="w")
-    box = app.make_text(f, height=5, width=60, wrap="word", font=("Segoe UI", 10))
+    box = app.make_text(f, height=5, width=60, wrap="word", font=(P.UI_FONT, 10))
     box.pack(fill="x", pady=(8, 0))
     box.insert("1.0", "\n".join(D.quoted_text(prompt)))
     note = ttk.Label(f, text=f"Redraws with {gm.PROFILES[gm.fixer_profile()]['name']}. About a minute for each "
@@ -293,6 +292,9 @@ def fix_words_dialog(app):
 # ---------------- wallpaper ----------------
 
 def _wallpaper():
+    if P.IS_MAC:
+        import moss_wallpaper_mac
+        return moss_wallpaper_mac
     import moss_wallpaper
     return moss_wallpaper
 
@@ -386,28 +388,20 @@ def wotd_settings(app):
     return d
 
 
-def task_command():
+def task_args():
+    """What the daily task runs: this app with --wallpaper-of-the-day."""
     gm = G()
     if gm.FROZEN:
-        return f'"{sys.executable}" --wallpaper-of-the-day'
-    pyw = Path(sys.executable).with_name("pythonw.exe")
-    return f'"{pyw if pyw.exists() else sys.executable}" "{Path(gm.__file__).resolve()}" --wallpaper-of-the-day'
+        return [sys.executable, "--wallpaper-of-the-day"]
+    python = Path(sys.executable)
+    if P.IS_WIN and python.with_name("pythonw.exe").exists():
+        python = python.with_name("pythonw.exe")             # no console window
+    return [str(python), str(Path(gm.__file__).resolve()), "--wallpaper-of-the-day"]
 
 
 def schedule_task(enabled, at):
-    """Create or remove the daily Windows Task Scheduler entry (only when the user turns it on or off)."""
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    if enabled:
-        run = subprocess.run(["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", at, "/TN", TASK_NAME,
-                              "/TR", task_command()], capture_output=True, text=True, creationflags=flags)
-    else:
-        run = subprocess.run(["schtasks", "/Delete", "/F", "/TN", TASK_NAME], capture_output=True, text=True,
-                             creationflags=flags)
-        err = (run.stderr or "").lower()
-        if "cannot find" in err or "does not exist" in err:
-            return
-    if run.returncode != 0:
-        raise RuntimeError((run.stderr or run.stdout or "schtasks failed").strip())
+    """Create or remove the daily task (only when the user turns it on or off)."""
+    P.schedule_daily(enabled, at, task_args())
 
 
 def open_wotd(app):
@@ -415,7 +409,7 @@ def open_wotd(app):
     cfg = wotd_settings(app)
     win, f = app.make_window("Wallpaper of the day")
     ttk.Label(f, text="Makes a fresh wallpaper every day at the time you choose, from one of your prompts (taking "
-                      "them in turn), and sets it on your screens. Your PC needs to be on and you signed in.",
+                      "them in turn), and sets it on your screens. Your computer needs to be on and you signed in.",
               wraplength=560, justify="left").grid(row=0, column=0, columnspan=3, sticky="w")
     enabled = tk.BooleanVar(value=cfg["enabled"])
     ttk.Checkbutton(f, text="Make a new wallpaper every day at", variable=enabled).grid(
@@ -423,7 +417,7 @@ def open_wotd(app):
     at = tk.StringVar(value=cfg["time"])
     ttk.Entry(f, textvariable=at, width=7).grid(row=1, column=1, sticky="w", pady=(10, 0))
     ttk.Label(f, text="Prompts (one per line)").grid(row=2, column=0, sticky="nw", pady=(8, 0))
-    prompts = app.make_text(f, height=6, width=60, wrap="word", font=("Segoe UI", 10))
+    prompts = app.make_text(f, height=6, width=60, wrap="word", font=(P.UI_FONT, 10))
     prompts.grid(row=2, column=1, columnspan=2, sticky="we", pady=(8, 0))
     prompts.insert("1.0", cfg["prompts"])
     app.apply_theme_to_text(prompts)
@@ -468,7 +462,7 @@ def open_wotd(app):
             try:
                 schedule_task(new["enabled"], new["time"])
             except Exception as e:
-                messagebox.showerror("Wallpaper of the day", f"Windows couldn't schedule it:\n{e}", parent=win)
+                messagebox.showerror("Wallpaper of the day", f"{P.OS_NAME} couldn't schedule it:\n{e}", parent=win)
                 return
         app.settings["wotd"] = new
         app.save_settings()
@@ -740,7 +734,8 @@ def open_mask_painter(app):
         with Image.open(app.edit_mask) as m:
             mask = m.convert("L").resize((W, H))
     win, f = app.make_window("Paint the area to change")
-    ttk.Label(f, text="Paint over the part of the picture to change (left mouse). Right mouse erases. "
+    ttk.Label(f, text="Paint over the part of the picture to change. Right mouse button, or Shift while "
+                      "painting, erases. "
                       "Then describe what should be there instead and click Edit picture.",
               wraplength=cw, justify="left").grid(row=0, column=0, columnspan=4, sticky="w")
     canvas = tk.Canvas(f, width=cw, height=ch, highlightthickness=0, cursor="crosshair")
@@ -766,10 +761,13 @@ def open_mask_painter(app):
 
     canvas.bind("<B1-Motion>", lambda e: paint(e, 255))
     canvas.bind("<Button-1>", lambda e: paint(e, 255))
-    canvas.bind("<B3-Motion>", lambda e: paint(e, 0))
-    canvas.bind("<Button-3>", lambda e: paint(e, 0))
+    canvas.bind("<Shift-B1-Motion>", lambda e: paint(e, 0))
+    canvas.bind("<Shift-Button-1>", lambda e: paint(e, 0))
     canvas.bind("<ButtonRelease-1>", lambda e: redraw())
-    canvas.bind("<ButtonRelease-3>", lambda e: redraw())
+    for b in ("3",) if P.IS_WIN else ("2", "3"):             # the right button is Button-2 on a Mac
+        canvas.bind(f"<B{b}-Motion>", lambda e: paint(e, 0))
+        canvas.bind(f"<Button-{b}>", lambda e: paint(e, 0))
+        canvas.bind(f"<ButtonRelease-{b}>", lambda e: redraw())
     ttk.Label(f, text="Brush size").grid(row=2, column=0, sticky="w", pady=(8, 0))
     ttk.Scale(f, from_=4, to=max(40, min(W, H) // 6), variable=brush, orient="horizontal", length=220).grid(
         row=2, column=1, sticky="w", pady=(8, 0))
@@ -855,7 +853,7 @@ def open_layout(app):
     words = tk.StringVar()
     ttk.Entry(side, textvariable=words, width=42).pack(anchor="w")
     ttk.Label(f, text="The whole picture").grid(row=7, column=0, sticky="w", pady=(10, 0))
-    summary = app.make_text(f, height=3, width=90, wrap="word", font=("Segoe UI", 10))
+    summary = app.make_text(f, height=3, width=90, wrap="word", font=(P.UI_FONT, 10))
     summary.grid(row=8, column=0, columnspan=2, sticky="we")
     app.apply_theme_to_text(summary)
     current = app.prompt.get("1.0", "end").strip()
@@ -1038,7 +1036,7 @@ def open_advanced(app):
 
     b = ttk.Frame(f)
     b.grid(row=10, column=0, columnspan=3, sticky="e", pady=(12, 0))
-    ttk.Button(b, text="Open LoRA folder", command=lambda: os.startfile(str(gm.MODELS / "loras" / "styles"))).pack(
+    ttk.Button(b, text="Open LoRA folder", command=lambda: P.open_path(gm.MODELS / "loras" / "styles")).pack(
         side="left")
     ttk.Button(b, text="Reset to defaults", command=reset).pack(side="left", padx=6)
     ttk.Button(b, text="Save", command=save).pack(side="left")
@@ -1115,7 +1113,7 @@ def open_gallery(app):
     count.pack(side="left", padx=12)
     outer = ttk.Frame(f)
     outer.pack(fill="both", expand=True, pady=(8, 0))
-    canvas = tk.Canvas(outer, highlightthickness=0, background=app.colors.get("bg") or "SystemButtonFace")
+    canvas = tk.Canvas(outer, highlightthickness=0, background=app.colors.get("bg") or P.WINDOW_BG)
     bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
     canvas.configure(yscrollcommand=bar.set)
     bar.pack(side="right", fill="y")
@@ -1123,7 +1121,7 @@ def open_gallery(app):
     grid = ttk.Frame(canvas)
     canvas.create_window(0, 0, anchor="nw", window=grid)
     grid.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-    canvas.bind_all("<MouseWheel>", lambda e: canvas.winfo_exists() and canvas.yview_scroll(-e.delta // 120, "units"))
+    canvas.bind_all("<MouseWheel>", lambda e: canvas.winfo_exists() and canvas.yview_scroll(P.wheel_units(e), "units"))
     state = dict(items=[], photos={}, shown=0)
     PAGE, COLS = 60, 6
 
@@ -1140,9 +1138,8 @@ def open_gallery(app):
                                                                                    app.show_picture(it["path"])))
         menu.add_command(label="Edit this picture", command=lambda: edit_this(app, it["path"]))
         menu.add_command(label="Write a prompt from it", command=lambda: app.open_describe(it["path"]))
-        menu.add_command(label="Open", command=lambda: os.startfile(str(it["path"])))
-        menu.add_command(label="Show in folder",
-                         command=lambda: subprocess.Popen(["explorer", "/select,", str(it["path"])]))
+        menu.add_command(label="Open", command=lambda: P.open_path(it["path"]))
+        menu.add_command(label="Show in folder", command=lambda: P.show_in_folder(it["path"]))
         menu.tk_popup(e.x_root, e.y_root)
 
     def render():
@@ -1158,7 +1155,8 @@ def open_gallery(app):
             name = it["title"] or it["path"].stem
             ttk.Label(cell, text=name[:30], style="Hint.TLabel", wraplength=180).pack()
             lbl.bind("<Button-1>", lambda e, it=it: app.show_picture(it["path"]))
-            lbl.bind("<Button-3>", lambda e, it=it, w=lbl: menu_for(it, w, e))
+            for ev in P.right_click_events():
+                lbl.bind(ev, lambda e, it=it, w=lbl: menu_for(it, w, e))
             it["label"] = lbl
         total = sum(1 for it in state["items"] if matches(it))
         count.configure(text=f"{min(len(shown), total)} of {total} pictures. Click to open, right-click for more.")
@@ -1378,8 +1376,9 @@ def open_remote(app):
         else:
             urls = [f"http://{a}:{server.port}/" for a in local_addresses()] or [f"http://<this PC's address>:{server.port}/"]
         where.configure(text="On. Open one of these on your phone:\n  " + "\n  ".join(urls) +
-                        ("\n\nIf Windows asks whether to allow network access, allow it on private networks."
-                         if server.host != "127.0.0.1" else ""))
+                        (("\n\nIf Windows asks whether to allow network access, allow it on private networks."
+                          if P.IS_WIN else "\n\nIf macOS asks whether to accept incoming network connections, "
+                          "click Allow.") if server.host != "127.0.0.1" else ""))
 
     def save():
         new = dict(cfg, enabled=enabled.get(), scope=scope.get())

@@ -92,10 +92,17 @@ Same seed, one word changed (*orange cat* to *black cat*):
 
 ## Requirements
 
+**Windows** (the main version, built and tested on this setup):
+
 - Windows 10 or 11, 64-bit.
 - An NVIDIA graphics card, ideally with 16 GB of memory; it's built and tested on an RTX 4070 Ti SUPER. On smaller cards the installer may fall back to a smaller model; see *Troubleshooting*.
 - About 13 GB of free disk space for the engine and MOSS-Image, plus 8.6 GB for FLUX and 14 GB for Qwen if you add them.
 - An internet connection for the one-time download.
+
+**Mac** (new in 1.8; see [On a Mac](#on-a-mac-apple-silicon)):
+
+- A Mac with Apple Silicon (M1 or newer), ideally with 24 GB of memory or more, and a recent macOS.
+- Python 3.11 or newer with Tk (from Homebrew or python.org), and the GitHub CLI to download this private project.
 
 ## Quick start
 
@@ -131,6 +138,45 @@ Same seed, one word changed (*orange cat* to *black cat*):
    Each picture is billed to your key: about $0.03 at 1K, $0.05 at 2K, $0.11 at 4K. Your prompt, and the picture when editing, is sent to Google, and Google adds its invisible SynthID watermark. Nano Banana has no seeds, so every picture is new.
 
 If the app opens with a message that the engine or models weren't found, it's in the wrong folder or the installer hasn't finished. The message lists exactly what's missing.
+
+## On a Mac (Apple Silicon)
+
+New in 1.8 and not yet tested on a real Mac; please report what the self-check says.
+
+The Mac version runs the same app with Apple Silicon builds of the same engines (stable-diffusion.cpp and llama.cpp, using the Mac's graphics chip through Metal) and the same model files.
+
+1. **Install Python with Tk and the GitHub CLI.** With [Homebrew](https://brew.sh):
+
+   ```bash
+   brew install python@3.13 python-tk@3.13 gh
+   gh auth login
+   ```
+
+2. **Download the project:**
+
+   ```bash
+   gh repo clone binkleyz2/MOSS-ImageGenerator
+   cd MOSS-ImageGenerator
+   ```
+
+3. **Run the installer.** It sets up Python, downloads both engines and MOSS-Image (about 11 GB), offers the extra models, makes **MOSS Image Studio** in your Applications folder, and runs a self-check:
+
+   ```bash
+   ./install-mac.sh
+   ```
+
+   To name the extra models up front: `./install-mac.sh flux flux3 zimage`. Add more later with `./download-models.sh`.
+
+4. **Send the report.** The self-check saves *MOSS Mac check.txt* on your Desktop. It lists your Mac, memory, screens, whether both engines start, a test picture and how long a 1024 x 1024 picture took. Run `moss-image-pc/tools/venv/bin/python moss-image-pc/tools/mac_setup.py check --all` to time every model you've downloaded.
+
+**What's different on a Mac:**
+
+- **Memory is shared.** The graphics chip uses the Mac's own memory: macOS lets it use about two-thirds (about 16 GB on a 24 GB Mac). Every model fits at normal sizes, but the largest sizes may not; the app warns when memory is short. Quitting other apps, especially browsers, frees memory.
+- **Speed.** Expect several times longer than on the RTX 4070 Ti SUPER. The time estimate starts with a guess and learns your Mac's real speed after a few pictures.
+- **Wallpapers** are set for the current desktop (Space) of each screen. Spanning a picture across screens cuts it into one piece per screen.
+- **Wallpaper of the day** uses a macOS launch agent instead of Task Scheduler, and the **Gemini key** is kept in the Keychain.
+- **Right-click** (or Control-click) opens the Gallery menu; in **Paint area**, the right button or Shift-drag erases.
+- **Updates.** **Check for updates** updates the engines and models as on Windows, and updates the app itself with `git pull` (using your `gh` sign-in).
 
 ## Using it
 
@@ -260,12 +306,16 @@ It makes one small picture through the app and writes `selftest-result.json`.
 | Path | What it is |
 | --- | --- |
 | `installer-moss-image.ps1` | Downloads and sets up the engine and MOSS-Image, and makes a test picture |
+| `install-mac.sh`, `download-models.sh` | The same for a Mac with Apple Silicon |
 | `download-models.ps1` | Downloads the optional models: MOSS editing add-on, FLUX.2 Klein, FLUX.3 Image Klein, Z-Image Turbo, Qwen Image 2.1, AI upscaler |
 | `moss-image-pc/tools/moss_gui.py` | MOSS Image Studio |
 | `moss-image-pc/tools/moss_describe.py` | Write a prompt from a picture: local (llama.cpp + Qwen vision) or Gemini |
 | `moss-image-pc/tools/moss_updates.py` | Checks and installs model and engine updates, verified, with undo |
 | `moss-image-pc/tools/moss_extras.py` | Gallery, queue and compare, enhancer, upscaling, wallpaper of the day, paint-to-edit, layout boxes, advanced settings, phone access window |
 | `moss-image-pc/tools/moss_wallpaper.py` | Sets Windows wallpapers per monitor or spanned (IDesktopWallpaper), with undo |
+| `moss-image-pc/tools/moss_wallpaper_mac.py` | The same for macOS desktop pictures (AppKit) |
+| `moss-image-pc/tools/moss_platform.py` | What differs between Windows and macOS: screens, memory, keys, files, schedules |
+| `moss-image-pc/tools/mac_setup.py`, `download_models.py` | Mac engines, app and self-check; model downloads |
 | `moss-image-pc/tools/moss_remote.py` | The password-protected phone web page |
 | `moss-image-pc/tools/moss_cloud.py` | Nano Banana: Google Gemini API requests and the encrypted API key |
 | `moss-image-pc/tools/moss_meta.py` | Reads and writes picture details (EXIF / XMP / PNG text) |
