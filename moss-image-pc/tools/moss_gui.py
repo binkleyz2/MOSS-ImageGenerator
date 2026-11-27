@@ -31,7 +31,7 @@ import moss_meta as M
 import moss_updates as U
 import moss_extras as X
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -431,6 +431,25 @@ def keep_unpainted(raw, src, mask):
     Image.composite(made, original, soft).save(raw, "PNG", compress_level=1)
 
 
+def save_screen_parts(source, final, scr, meta):
+    """Cut a picture made for several screens into one picture per screen. Returns the new files."""
+    with Image.open(source) as im:
+        full = im.convert("RGB")
+    sx, sy = full.width / scr["W"], full.height / scr["H"]
+    n, files = len(scr["parts"]), []
+    for i, p in enumerate(scr["parts"], 1):
+        box = (round(p["x"] * sx), round(p["y"] * sy), round((p["x"] + p["w"]) * sx), round((p["y"] + p["h"]) * sy))
+        tmp = final.with_name(f"{final.stem}_part{i}.tmp.png")
+        full.crop(box).save(tmp, "PNG", compress_level=1)
+        out = final.with_name(f"{final.stem}_part{i}-{p['name']}{final.suffix}")
+        part_meta = dict(meta, title=f"{meta.get('title', '')} ({p['name']} screen)",
+                         settings=meta.get("settings", "") + f"; part {i} of {n}: {p['name']} screen {p['w']}x{p['h']}")
+        M.write(out, part_meta, source=tmp)
+        tmp.unlink(missing_ok=True)
+        files.append(out)
+    return files
+
+
 def finish_files(job, say):
     """After the engine is done: scale up for screens, save with details, split per screen. Returns files."""
     raw, final, scr = job["raw"], job["final"], job.get("screen")
@@ -458,30 +477,36 @@ def finish_files(job, say):
     files = [final]
     if scr and job["split"] and len(scr["parts"]) > 1:
         say("Saving a picture for each screen...")
-        with Image.open(raw) as im:
-            full = im.convert("RGB")
-        sx, sy = full.width / scr["W"], full.height / scr["H"]
-        n = len(scr["parts"])
-        for i, p in enumerate(scr["parts"], 1):
-            box = (round(p["x"] * sx), round(p["y"] * sy), round((p["x"] + p["w"]) * sx), round((p["y"] + p["h"]) * sy))
-            tmp = final.with_name(f"{final.stem}_part{i}.tmp.png")
-            full.crop(box).save(tmp, "PNG", compress_level=1)
-            out = final.with_name(f"{final.stem}_part{i}-{p['name']}{final.suffix}")
-            meta = dict(job["meta"], title=f"{job['meta']['title']} ({p['name']} screen)",
-                        settings=job["meta"]["settings"] + f"; part {i} of {n}: {p['name']} screen {p['w']}x{p['h']}")
-            M.write(out, meta, source=tmp)
-            tmp.unlink(missing_ok=True)
-            files.append(out)
+        files += save_screen_parts(raw, final, scr, job["meta"])
     raw.unlink(missing_ok=True)
     if job["save_txt"]:
         write_txt(final, job)
     return files
 
 
-def check_text(job, picture, say):
-    """Read the words back from a new picture and compare them with the quoted text in the prompt.
-    Returns dict(ok, score, seen, details), or None if the check couldn't run."""
+def expected_words(job, say):
+    """The words a new picture must show: the "quoted" text in the prompt or, when changing a picture with an
+    instruction and nothing is quoted, the words already in the original (read once and remembered)."""
+    spec = job.get("spec") or {}
     expected = D.quoted_text(job["prompt"])
+    if expected or not spec.get("editing") or spec.get("mask") or not spec.get("edit_src"):
+        return expected
+    if "source_words" not in spec:
+        reader = D.text_reader(ROOT)
+        spec["source_words"] = []
+        if reader:
+            say("Reading the words in the original picture...")
+            try:
+                spec["source_words"] = D.source_words(D.read_text_local(ROOT, reader[0], reader[1], spec["edit_src"]))
+            except Exception:
+                pass
+    return spec["source_words"]
+
+
+def check_text(job, picture, say):
+    """Read the words back from a new picture and compare them with the words it should have (expected_words).
+    Returns dict(ok, score, seen, details), or None if the check couldn't run."""
+    expected = expected_words(job, say)
     reader = D.text_reader(ROOT)
     if not expected or not reader:
         return None
@@ -492,6 +517,124 @@ def check_text(job, picture, say):
         return None
     ok, score, details = D.text_score(expected, seen)
     return dict(ok=ok, score=score, seen=seen, details=details)
+
+
+REDRAW_STRENGTH = 0.8            # word fixer: how much of the old lettering to redraw (lower keeps size and style)
+TEXT_FIXES = 2                    # word fixer: passes over the best picture after the tries run out
+FIXERS = ["qwen-image-2.1", "flux2-klein-4b", "moss"]     # best at text first
+
+
+def fixer_profile():
+    """The local model used to redraw wrong words: the best one at text that's downloaded, or None."""
+    for key in FIXERS:
+        if SD_CLI.exists() and all(p.exists() for p in profile_files(PROFILES[key])):
+            return key
+    return None
+
+
+def fix_name(picture):
+    """A new file name next to a picture for its word-fixed copy."""
+    picture = Path(picture)
+    stem = re.sub(r"_fixed\d*$", "", picture.stem)
+    for n in range(1, 100):
+        out = picture.with_name(f"{stem}_fixed{'' if n == 1 else n}{picture.suffix}")
+        if not out.exists():
+            return out
+    return picture.with_name(f"{stem}_fixed_{random.randint(0, 99999)}{picture.suffix}")
+
+
+def redraw_area(full, box, words, prompt, key, seed, workdir, on_proc=None, strength=REDRAW_STRENGTH):
+    """Redraw one piece of text in a picture (PIL image, changed in place). Only a padded area around `box` is
+    repainted, on a crop of about 1 MP, so it's quick even on big screen pictures; every pixel outside that
+    area stays exactly as it was."""
+    profile = PROFILES[key]
+    W, H = full.size
+    x0, y0, x1, y1 = box
+    bh = y1 - y0
+    pad, padx = round(bh * 0.35) + 6, round(bh * 0.35 + (x1 - x0) * 0.06) + 6
+    mx0, my0, mx1, my1 = max(0, x0 - padx), max(0, y0 - pad), min(W, x1 + padx), min(H, y1 + pad)
+    cw = min(W, max(round((mx1 - mx0) * 1.5), 512))            # some context around it
+    ch = min(H, max(round((my1 - my0) * 2.5), 512))
+    cx = min(max(0, (mx0 + mx1) // 2 - cw // 2), W - cw)
+    cy = min(max(0, (my0 + my1) // 2 - ch // 2), H - ch)
+    crop = full.crop((cx, cy, cx + cw, cy + ch))
+    mask = Image.new("L", (cw, ch), 0)
+    mask.paste(255, (mx0 - cx, my0 - cy, mx1 - cx, my1 - cy))
+    scale = min(2.0, (1_000_000 / (cw * ch)) ** 0.5)
+    a = profile["align"]
+    rw, rh = max(a, round(cw * scale / a) * a), max(a, round(ch * scale / a) * a)
+    init, mask_file, out = workdir / "crop.png", workdir / "mask.png", workdir / "redrawn.png"
+    crop.resize((rw, rh), Image.Resampling.LANCZOS).save(init)
+    mask.resize((rw, rh), Image.Resampling.NEAREST).save(mask_file)
+    text = (f'Text that reads exactly "{words}", every letter spelled correctly, in the same lettering style, '
+            f"size, colour and lighting as the rest of the picture. {prompt[:400]}")
+    cmd = [str(SD_CLI)]
+    for option, rel in profile["files"].items():
+        cmd += [option, str(MODELS / rel)]
+    cmd += ["--cfg-scale", str(profile["cfg"]), "--steps", str(profile["steps"]), "-W", str(rw), "-H", str(rh),
+            "-s", str(seed), "--offload-to-cpu", "-i", str(init), "--mask", str(mask_file), "--strength", str(strength),
+            "-p", text, "-o", str(out)]
+    if profile["sampler"]:
+        cmd += ["--sampling-method", profile["sampler"]]
+    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if on_proc:
+        on_proc(proc)
+    if proc.wait() != 0 or not out.exists():
+        raise RuntimeError(f"{profile['name']} couldn't redraw the words (it may need more free memory).")
+    with Image.open(out) as im:
+        made = im.convert("RGB")
+    if scale < 0.75 and UPSCALER.exists():                      # big picture: keep the redrawn part sharp
+        try:
+            ai_upscale(out, workdir / "redrawn4.png")
+            with Image.open(workdir / "redrawn4.png") as im:
+                made = im.convert("RGB")
+        except Exception:
+            pass
+    made = made.resize((cw, ch), Image.Resampling.LANCZOS)
+    soft = mask.filter(ImageFilter.MinFilter(5)).filter(ImageFilter.BoxBlur(2))
+    full.paste(Image.composite(made, crop, soft), (cx, cy))
+
+
+def fix_words(picture, expected, say, out, on_proc=None, cancelled=lambda: False, prompt="", strength=REDRAW_STRENGTH):
+    """Find the words that came out wrong in a picture and redraw just those areas with a local model.
+    Saves the result (with the picture's details) as `out` and returns the model name used.
+    Raises RuntimeError if there's nothing to fix or it can't be done."""
+    reader, key = D.text_reader(ROOT), fixer_profile()
+    if not reader:
+        raise RuntimeError("Fixing words needs a local vision model (the Qwen3-VL files that come with Qwen Image).")
+    if not key:
+        raise RuntimeError("Fixing words needs one of the image models on this PC.")
+    say("Reading the words...")
+    seen = D.read_text_local(ROOT, reader[0], reader[1], picture)
+    ok, _score, details = D.text_score(expected, seen)
+    wrong = [d[0] for d in details if d[2] < 1]
+    if ok or not wrong:
+        raise RuntimeError("The words already read correctly.")
+    with Image.open(picture) as im:
+        full = im.convert("RGB")
+    fixed = []
+    with tempfile.TemporaryDirectory(prefix="moss-fix-") as tmp:
+        for i, words in enumerate(wrong, 1):
+            if cancelled():
+                raise RuntimeError("Cancelled.")
+            say(f'Finding "{words[:40]}" in the picture...')
+            box = D.locate_text(ROOT, reader[0], reader[1], picture, words)
+            if not box:
+                continue
+            say(f'Redrawing "{words[:40]}" with {PROFILES[key]["name"]} ({i} of {len(wrong)})...')
+            redraw_area(full, box, words, prompt, key, random.randint(0, 2**30 - 1), Path(tmp), on_proc, strength)
+            fixed.append(words)
+        if not fixed:
+            raise RuntimeError("Couldn't find where the wrong words are in the picture.")
+        say("Saving...")
+        raw = Path(tmp) / "fixed.png"
+        full.save(raw, "PNG", compress_level=1)
+        meta = M.read(picture)
+        meta["settings"] = (meta.get("settings", "") + f"; words redrawn with {PROFILES[key]['name']}: "
+                            + ", ".join(f'"{w}"' for w in fixed)).lstrip("; ")
+        M.write(out, meta, source=raw)
+    return PROFILES[key]["name"]
 
 
 # ---------------- the window ----------------
@@ -548,6 +691,26 @@ class Studio:
         if check:
             self.root.after(400, self.check_install)
             self.root.after(800, self.autostart_remote)
+            self.root.after(5000, self.quiet_update_check)
+            U.remove_old_app()
+
+    def quiet_update_check(self):
+        """Once a day, look for a new version of this app and new engines, and mention them in the status line."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.settings.get("update_notice") is False or self.settings.get("update_checked") == today:
+            return
+        self.settings["update_checked"] = today
+
+        def work():
+            found = []
+            try:
+                items = ([U.check_app(__version__)] if FROZEN else []) + U.check_engines(ROOT, lambda m: None)
+                found = [U.item_name(it) + f" {it.get('tag')}" for it in items if it["status"] == "update"]
+            except Exception:
+                pass
+            if found:
+                self.events.put(("updates", found))
+        threading.Thread(target=work, daemon=True).start()
 
     def autostart_remote(self):
         if self.settings.get("remote", {}).get("enabled"):
@@ -734,8 +897,8 @@ class Studio:
         start_btn.configure(command=lambda: X.start_from_menu(self, start_btn))
         start_btn.pack(side="left", padx=(4, 0))
         self.text_check = tk.BooleanVar(value=True)
-        ttk.Checkbutton(box, text=f'Check that words in "quotes" come out right, and retry if not '
-                                  f'(up to {TEXT_TRIES} tries)', variable=self.text_check
+        ttk.Checkbutton(box, text='Check the words come out right (words in "quotes", or the words already in a '
+                                  'picture you edit); retry or fix them if not', variable=self.text_check
                         ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.prompt.bind("<<Modified>>", self.on_prompt_change)
 
@@ -889,6 +1052,8 @@ class Studio:
         btns2.pack(fill="x", pady=(6, 0))
         ttk.Button(btns2, text="Gallery...", command=lambda: X.open_gallery(self)).pack(side="left")
         ttk.Button(btns2, text="Open another picture...", command=self.open_other).pack(side="left", padx=6)
+        self.fix_btn = ttk.Button(btns2, text="Fix words...", command=lambda: X.fix_words_dialog(self))
+        self.fix_btn.pack(side="left")
 
         ed = ttk.LabelFrame(right, text=" Details stored in this picture (EXIF / XMP) ", padding=8)
         ed.pack(fill="x", pady=(8, 0))
@@ -1486,7 +1651,7 @@ class Studio:
                     upscale=bool(scr) and self.upscale.get(), split=bool(scr) and self.split.get(),
                     ai_upscale=bool(scr) and self.upscale.get() and self.ai_upscale.get() and UPSCALER.exists(),
                     adv=adv, label="",
-                    text_check=self.text_check.get() and not self.profile.get("cloud") and bool(D.quoted_text(prompt)))
+                    text_check=self.text_check.get() and (bool(D.quoted_text(prompt)) or (editing and not mask)))
 
     def memory_ok(self, spec):
         """Warn before a big job if Windows can't promise enough memory (see memory_advice)."""
@@ -1710,12 +1875,18 @@ class Studio:
             job["meta"]["settings"] = settings
             self.events.put(("saving", job))
             files = finish_files(job, say)
-            self.events.put(("done", (job, files, None)))
         except Exception as e:
             self.events.put(("done", (job, None, f"Google's picture could not be saved: {e}")))
+            return
+        if (job.get("spec") or {}).get("text_check"):
+            job["text"] = check_text(job, files[0], say)
+        self.events.put(("done", (job, files, None)))
 
     def run_job(self, job):
         """Worker thread: read the engine's output, then finish the files."""
+        if job.get("fix"):
+            self.run_fix(job)
+            return
         if job.get("cloud"):
             self.run_cloud(job)
             return
@@ -1768,6 +1939,10 @@ class Studio:
                     self.on_job_done(*data)
                 elif kind == "remote":
                     X.remote_request(self, data)
+                elif kind == "updates":
+                    if not self.job:
+                        self.status.configure(text="Updates available: " + ", ".join(data)
+                                              + ". Use More \u25be > Check for updates to install.")
                 elif kind == "tokenizer":
                     self.tokenizer = data
                     self.update_tokens()
@@ -1853,33 +2028,87 @@ class Studio:
         spec = job["spec"]
         spec.setdefault("t0", self.started)
         tries = spec.setdefault("text_tries", [])
-        tries.append(dict(job["text"], files=files, seed=job["seed"]))
-        if not job["text"]["ok"] and len(tries) < TEXT_TRIES:
-            wrong = ", ".join(f'"{d[1]}"' for d in job["text"]["details"] if d[2] < 1) or "nothing readable"
-            retry = dict(spec, seed="random", text_tries=tries, t0=spec["t0"])
-            if self.launch(retry, interactive=False):
-                self.status.configure(text=f"The words came out as {wrong[:80]}. Trying again "
-                                           f"({len(tries) + 1} of {TEXT_TRIES})...")
-                return None, ""
+        tries.append(dict(job["text"], files=files, seed=job["seed"], fix=bool(job.get("fix"))))
+        regular = [t for t in tries if not t["fix"]]
+        fixes = len(tries) - len(regular)
         best = max(tries, key=lambda t: t["score"])
+        cloud = bool(job.get("cloud"))
+        if not best["ok"]:
+            wrong = ", ".join(f'"{d[1]}"' for d in job["text"]["details"] if d[2] < 1) or "nothing readable"
+            if not cloud and len(regular) < TEXT_TRIES:
+                retry = dict(spec, seed="random", text_tries=tries, t0=spec["t0"])
+                if self.launch(retry, interactive=False):
+                    self.status.configure(text=f"The words came out as {wrong[:80]}. Trying again "
+                                               f"({len(regular) + 1} of {TEXT_TRIES})...")
+                    return None, ""
+            if fixes < TEXT_FIXES and not spec.get("fix_failed") and best["files"] and fixer_profile():
+                self.launch_fix(job, best)
+                return None, ""
+            if cloud and len(regular) < TEXT_TRIES and not spec.get("queued") and messagebox.askyesno(
+                    "Text check", f"The words came out as {wrong[:120]}, and fixing them here didn't fully work."
+                    f"\n\nMake another try with Nano Banana (about ${job['price']:.2f}, billed to your Gemini key)?"):
+                retry = dict(spec, text_tries=tries, t0=spec["t0"])
+                if self.launch(retry, interactive=False):
+                    return None, ""
         for t in tries:
-            if t is not best:
+            if t is not best and not any(f in best["files"] for f in t["files"]):
                 for f in t["files"]:
                     for p in (Path(f), Path(f).with_suffix(".txt")):
                         p.unlink(missing_ok=True)
-        n = len(tries)
+        n = len(regular)
+        fixed = " (wrong words redrawn)" if best["fix"] else ""
         if best["ok"]:
-            note = "  Words checked: correct" + (f" (try {tries.index(best) + 1} of {n})." if n > 1 else ".")
+            note = "  Words checked: correct" + (f" (try {regular.index(best) + 1} of {n})." if n > 1 and not best["fix"]
+                                                 else f"{fixed}.")
         else:
             seen = " / ".join(best["seen"])[:120] or "nothing readable"
-            note = f"  Words still not right after {n} tries; kept the closest."
+            note = f"  Words still not right after {n} tr{'ies' if n != 1 else 'y'}{fixed}; kept the closest."
             if not spec.get("queued"):
                 messagebox.showinfo(
-                    "Text check", f"The words didn't come out exactly right in {n} tries. The closest one is shown; "
+                    "Text check", f"The words didn't come out exactly right. The closest one is shown; "
                     f"it reads:\n\n{seen}\n\nQwen Image is the best of the models on this PC at text. "
-                    "Shorter quoted text and the Standard size also help.")
+                    "Shorter quoted text and the Standard size also help, and Fix words... can try again.")
         job["seed"] = best["seed"]                  # so "Variation (same seed)" uses the picture kept
         return best["files"], note
+
+    def launch_fix(self, job, best):
+        """Start redrawing just the wrong words in the best picture so far (a word-fixer job)."""
+        fix = dict(job, fix=True, cancelled=False, proc=None, text=None, source_files=list(best["files"]),
+                   seed=best["seed"])
+        started = self.started
+        self.begin_ui("Fixing just the wrong words...")
+        self.started = started
+        self.job = fix
+        threading.Thread(target=self.run_job, args=(fix,), daemon=True).start()
+
+    def run_fix(self, job):
+        """Worker thread for a word-fixer job: redraw the wrong words, re-cut screen pictures, check again."""
+        say = lambda msg: self.events.put(("status", msg))  # noqa: E731
+        spec = job["spec"]
+        src = Path(job["source_files"][0])
+        out = fix_name(src)
+        try:
+            fix_words(src, expected_words(job, say), say, out, on_proc=lambda p: job.__setitem__("proc", p),
+                      cancelled=lambda: job["cancelled"], prompt=job["prompt"],
+                      strength=REDRAW_STRENGTH if not any(t["fix"] for t in spec.get("text_tries", [])) else 0.92)
+            files = [out]
+            if len(job["source_files"]) > 1 and job.get("screen"):
+                say("Saving a picture for each screen...")
+                files += save_screen_parts(out, out, job["screen"], M.read(out))
+            txt = src.with_suffix(".txt")
+            if txt.exists():
+                out.with_suffix(".txt").write_text(txt.read_text(encoding="utf-8").replace(src.name, out.name),
+                                                   encoding="utf-8")
+        except Exception as e:
+            if job["cancelled"]:
+                self.events.put(("done", (job, None, None)))
+                return
+            spec["fix_failed"] = str(e)
+            job["text"] = dict(ok=False, score=-1.0, seen=[], details=[])
+            self.events.put(("done", (job, [], None)))
+            return
+        job["text"] = check_text(job, out, say) or dict(ok=False, score=-1.0, seen=[], details=[])
+        self.events.put(("done", (job, files, None)))
 
     # ---------------- queue ----------------
     def queue_add(self, spec, label="", group=None):
@@ -2352,7 +2581,7 @@ class Studio:
             state["items"], state["vars"] = items, []
             for r, it in enumerate(items):
                 if "key" in it:
-                    label = U.ENGINES[it["key"]]["name"]
+                    label = U.item_name(it)
                     mine = it.get("mine") or "not recorded"
                     what = {"current": f"up to date ({mine})",
                             "update": f"update: {mine} -> {it.get('tag')} ({U.fmt_size(it['size'])})",
@@ -2376,7 +2605,8 @@ class Studio:
         def check_worker():
             try:
                 say = lambda m: q.put(("status", m))
-                items = U.check_engines(ROOT, say) + U.check_models(ROOT, say)
+                items = ([U.check_app(__version__)] if FROZEN else []) + U.check_engines(ROOT, say) \
+                    + U.check_models(ROOT, say)
                 q.put(("checked", items))
             except Exception as e:
                 q.put(("failed", f"Couldn't check for updates: {e}"))
@@ -2414,7 +2644,11 @@ class Studio:
             done, problems = [], []
             for it in chosen:
                 try:
-                    if "key" in it:
+                    if it.get("key") == "app":
+                        U.update_app(it, say)
+                        done.append(f"MOSS Image Studio -> {it['tag']} (restart to use it)")
+                        state["restart"] = True
+                    elif "key" in it:
                         U.update_engine(ROOT, it, say)
                         say(f"Testing the new {U.ENGINES[it['key']]['name']}...")
                         if engine_selftest(it["key"]):
@@ -2427,7 +2661,7 @@ class Studio:
                         U.update_model(ROOT, it, say)
                         done.append(it["rel"])
                 except Exception as e:
-                    problems.append(f"{it.get('rel') or U.ENGINES[it['key']]['name']}: {e}")
+                    problems.append(f"{it.get('rel') or U.item_name(it)}: {e}")
             q.put(("installed", (done, problems)))
 
         def install():
@@ -2453,6 +2687,10 @@ class Studio:
             if problems:
                 text += "\n\nProblems:\n  " + "\n  ".join(problems)
             (messagebox.showwarning if problems else messagebox.showinfo)("Updates", text, parent=win)
+            if state.pop("restart", False) and messagebox.askyesno(
+                    "Updates", "Restart MOSS Image Studio now to use the new version?", parent=win):
+                self.restart()
+                return
             check()
 
         def undo():
@@ -2474,6 +2712,14 @@ class Studio:
                                  failed=lambda m: (busy(False), status.configure(text=m)),
                                  installed=on_installed), win)
         check()
+
+    def restart(self):
+        """Close and start the (just updated) app again."""
+        if self.job:
+            return
+        subprocess.Popen([sys.executable] + ([] if FROZEN else [str(Path(__file__).resolve())]),
+                         cwd=str(Path(sys.executable).parent), creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        self.on_close()
 
     def on_close(self):
         if self.job and not messagebox.askyesno("MOSS Image Studio", "A picture is still being made. Stop it and close?"):

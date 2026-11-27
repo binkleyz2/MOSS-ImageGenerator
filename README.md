@@ -25,11 +25,14 @@ MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/
 - **Set as wallpaper.** Put a picture on your desktop: one slice per monitor, spanned across all of them, the same picture everywhere, or one screen only. **Put my previous wallpaper back** undoes it.
 - **Wallpaper of the day.** Optionally makes a fresh wallpaper every morning from your prompts, varied by the prompt enhancer, and sets it. It's off until you turn it on.
 - **AI upscaling.** Real-ESRGAN makes screen panoramas sharp instead of soft when they're enlarged to full resolution. **Upscale** also makes a 2x or 4x copy of any picture.
-- **Gallery.** Browse everything you've made, search by prompt, filter by model. Right-click a picture to reuse its settings, edit it, describe it or open it.
+- **Gallery.** Browse everything you've made, search by prompt, filter by model. Right-click a picture to reuse its settings, edit it, describe it or open it. New pictures appear by themselves within a few seconds, even ones made by wallpaper of the day or phone access.
 - **Improve a prompt.** Turns a short idea into a detailed prompt, locally (Qwen 3.5) or with Gemini.
 - **Queue, variations and compare.** Queue several pictures to run one after another, make 4 variations with different seeds, or **compare models** with the same prompt side by side.
 - **Paint to edit.** In Edit mode, paint over just the area to change and describe what goes there. Everything you didn't paint is kept pixel for pixel, so text and details there can't change.
-- **Text check.** When your prompt has words in "quotes", the app reads them back from the finished picture with the local Qwen3-VL vision model. If they're misspelled, it tries again with a new seed (up to 3 tries) and keeps the best one. It works with the models on this PC and adds about 5 seconds per picture.
+- **Text check.** When your prompt has words in "quotes", the app reads them back from the finished picture with the local Qwen3-VL vision model. If they're misspelled, it tries again with a new seed (up to 3 tries) and keeps the best one. It adds about 5 seconds per picture.
+- **Keeps the words when you edit.** When you change a picture with an instruction and nothing is in quotes, the app reads the words in the original first and checks that the new picture still says the same thing.
+- **Fixes just the wrong words.** If the words are still wrong after the tries, the app finds them in the picture, redraws only that strip with Qwen Image (in the same lettering), and keeps the rest pixel for pixel. **Fix words...** does the same for any picture you open.
+- **Free text check for Nano Banana.** Google's pictures are checked on this PC too. Wrong words are fixed locally for free, and you're asked before any paid retry.
 - **Advanced settings** per model: steps, guidance, sampler, a negative prompt, kept line breaks (to control text layout), and **style LoRAs**.
 - **Layout boxes (MOSS).** Draw boxes to place things and text exactly where you want them, using MOSS-Image's own layout format.
 - **Low-memory warning** before a big job if Windows is short on memory, instead of failing partway.
@@ -37,7 +40,7 @@ MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/
 - **Write a prompt from any picture.** Pick a photo or an AI picture and the app writes a detailed prompt that recreates it, in a form all four models understand. Any readable text is copied in quotes.
   - It runs locally by default (free, private) with [llama.cpp](https://github.com/ggml-org/llama.cpp) and the Qwen vision files you already have; about 5-10 seconds.
   - Or use Google Gemini 3.5 Flash-Lite with your API key, about $0.001 per picture.
-- **Check for updates.** Compares every downloaded model file with its source on Hugging Face (by SHA-256 checksum), and the two engines with their latest GitHub releases.
+- **Check for updates.** Compares every downloaded model file with its source on Hugging Face (by SHA-256 checksum), the two engines with their latest GitHub releases, and the app itself with this project's latest release. Once a day the app checks quietly at startup and mentions anything new in the status line.
   - Updates install verified. Model files keep the old copy until the new one passes its checksum.
   - Engines are tested after installing and put back automatically if the test fails. There's also an **Undo** button for the image engine.
 - **Prompt box with a live token count.** It counts with MOSS's own Qwen 3.5 tokenizer (exact for MOSS, close for the other models) and handles long, multi-line prompts with quotes and special characters.
@@ -152,12 +155,14 @@ The first time, the local describer offers to download llama.cpp (about 360 MB) 
 
 **To change only part of a picture**, choose **Edit a picture**, then **Paint area...**. Paint over the part to change (right-click erases), click **Use this area**, describe what should be there, and click **Edit picture**. Everything outside the painted area stays exactly as it was.
 
-**To get text spelled right**, put the exact words in "quotes" and leave **Check that words in "quotes" come out right** ticked under the prompt. These things help most:
+**To get text spelled right**, put the exact words in "quotes" and leave **Check the words come out right** ticked under the prompt. The app retries up to 3 times, then redraws just the wrong words. When editing, put any *new* words in quotes; otherwise the app expects the original's words to stay. These things help most:
 - **Qwen Image** or **Nano Banana**: they're much better at text than FLUX.2 Klein or MOSS;
 - short quoted text;
 - the **Standard** size, then **Scale up** for screens.
 
 To make an existing picture sharper without redrawing it, use **Upscale ▾** instead; it can't change the words.
+
+**To fix the words in any picture**, open it and click **Fix words...**. Type what each piece of text should say, one per line, and click **Fix the words**. Only the misspelled text is redrawn, and the result is saved as a new copy ending in `_fixed`.
 
 **To place things exactly (MOSS)**, open **Start from ▾ > Layout boxes**:
 1. Drag boxes on the canvas.
@@ -174,7 +179,7 @@ Put LoRA `.safetensors` files in `models\loras\styles`, and only use a LoRA with
 
 **To use it from your phone**, open **More ▾ > Phone access**, set a password and turn it on. Open the address it shows in your phone's browser, on the same network or over your WireGuard tunnel. The app must be running on your PC. If Windows asks whether to allow network access, allow it for private networks.
 
-**To check for updates**, click **More ▾ > Check for updates...**. The first check reads every model file once (about half a minute); later checks take a second. Tick what to install, then click **Install selected**.
+**To check for updates**, click **More ▾ > Check for updates...**. The first check reads every model file once (about half a minute); later checks take a second. Tick what to install, then click **Install selected**. Updating the app itself uses the GitHub CLI (`gh`), signed in, because the project is private; the new `.exe` replaces the old one and the app offers to restart.
 
 **To change one detail**, there are two ways:
 
@@ -238,7 +243,9 @@ It makes one small picture through the app and writes `selftest-result.json`.
   - Windows Firewall allows the app on private networks.
 
   The page uses plain HTTP, so only use it on networks you trust or through the tunnel.
-- **The words come out misspelled.** If the text check still can't get them right in 3 tries, it keeps the closest one and tells you what it read. Try Qwen Image, shorten the quoted text, or make it at Standard size. The check needs the Qwen3-VL files that come with Qwen Image; without them it uses Qwen 3.5, which is less exact.
+- **The words come out misspelled.** If the text check still can't get them right in 3 tries and 2 redraws of the wrong words, it keeps the closest one and tells you what it read. **Fix words...** can try again. Try Qwen Image, shorten the quoted text, or make it at Standard size. The check needs the Qwen3-VL files that come with Qwen Image; without them it uses Qwen 3.5, which is less exact.
+- **An edit keeps retrying because the words changed on purpose.** Put the new words in "quotes" in the instruction, or untick **Check the words come out right** for that edit.
+- **The app update says it needs the GitHub CLI.** Install it from cli.github.com and run `gh auth login` once.
 - **A style LoRA does nothing or makes a mess.** It was probably made for a different model. Use it only with the model it was made for.
 - **An engine update failed its test.** The app puts the previous version back automatically and says so. Nothing else is needed; try again after the next release.
 - **A Qwen edit looks over-brightened or harsh.** This happens with very dark pictures. Use MOSS or FLUX for those.

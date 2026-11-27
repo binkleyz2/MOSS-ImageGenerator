@@ -295,3 +295,116 @@ def undo_engine(root, key):
     os.replace(folder, broken)
     os.replace(previous, folder)
     shutil.rmtree(broken, ignore_errors=True)
+
+
+# ---------------- this app ----------------
+# The project is private on GitHub, so the app is checked and downloaded through the GitHub CLI (gh), which
+# uses the sign-in already on this PC. Without gh it just says so.
+
+APP_REPO = "binkleyz2/MOSS-ImageGenerator"
+APP_ASSET = "MOSS-Image-Studio.exe"
+
+
+def item_name(item):
+    if item.get("key") == "app":
+        return "MOSS Image Studio (this app)"
+    return ENGINES[item["key"]]["name"] if "key" in item else item.get("rel", "")
+
+
+def _gh():
+    found = shutil.which("gh")
+    if found:
+        return found
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("LOCALAPPDATA", "")):
+        p = os.path.join(base, "GitHub CLI", "gh.exe")
+        if base and os.path.exists(p):
+            return p
+    return None
+
+
+def _run_gh(args, timeout=60):
+    import subprocess
+    gh = _gh()
+    if not gh:
+        raise IOError("needs the GitHub CLI (gh), signed in, because the project is private")
+    run = subprocess.run([gh] + args, capture_output=True, timeout=timeout,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if run.returncode != 0:
+        err = run.stderr.decode("utf-8", "replace").strip()
+        if "auth" in err.lower() or "login" in err.lower():
+            raise IOError("the GitHub CLI isn't signed in (run: gh auth login)")
+        raise IOError((err.splitlines() or ["GitHub CLI failed"])[-1])
+    return run.stdout.decode("utf-8", "replace")
+
+
+def _version(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in v.lstrip("v").split("."))
+
+
+def check_app(version):
+    """Update item for this app, compared with the project's latest release."""
+    try:
+        info = json.loads(_run_gh(["release", "view", "--repo", APP_REPO, "--json", "tagName,assets"]))
+        tag = info["tagName"]
+        asset = next((a for a in info.get("assets", []) if a["name"] == APP_ASSET), None)
+        if not asset:
+            return dict(key="app", status="error", mine=version, tag=tag, size=0,
+                        detail=f"release {tag} has no {APP_ASSET}")
+        newer = _version(tag) > _version(version)
+        sha = (asset.get("digest") or "").split(":", 1)[-1]
+        return dict(key="app", status="update" if newer else "current", mine=version, tag=tag,
+                    size=asset["size"], sha=sha if len(sha) == 64 else None, detail="")
+    except Exception as e:
+        return dict(key="app", status="error", mine=version, tag=None, size=0, detail=str(e))
+
+
+def _exe():
+    import sys
+    return os.path.abspath(sys.executable)
+
+
+def update_app(item, say):
+    """Download the new .exe and put it in place of the running one (Windows allows renaming a running .exe;
+    the old one is kept as MOSS-Image-Studio.old.exe until the next start)."""
+    import sys
+    import tempfile
+    if not getattr(sys, "frozen", False):
+        raise IOError("this copy runs from source; update it with git pull")
+    exe = _exe()
+    folder = os.path.dirname(exe)
+    tmp = tempfile.mkdtemp(prefix="moss-app-", dir=folder)
+    try:
+        say(f"Downloading MOSS Image Studio {item['tag']} ({fmt_size(item['size'])})...")
+        _run_gh(["release", "download", item["tag"], "--repo", APP_REPO, "--pattern", APP_ASSET,
+                 "--dir", tmp, "--clobber"], timeout=1800)
+        new = os.path.join(tmp, APP_ASSET)
+        if os.path.getsize(new) != item["size"]:
+            raise IOError("the download is incomplete")
+        if item.get("sha"):
+            h = hashlib.sha256()
+            with open(new, "rb") as f:
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    h.update(block)
+            if h.hexdigest() != item["sha"]:
+                raise IOError("the download doesn't match its checksum")
+        old = os.path.join(folder, "MOSS-Image-Studio.old.exe")
+        if os.path.exists(old):
+            os.remove(old)
+        os.replace(exe, old)
+        try:
+            shutil.move(new, exe)
+        except Exception:
+            os.replace(old, exe)
+            raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def remove_old_app():
+    """Delete the .exe an app update replaced, once the new one is running."""
+    import sys
+    if getattr(sys, "frozen", False):
+        try:
+            os.remove(os.path.join(os.path.dirname(_exe()), "MOSS-Image-Studio.old.exe"))
+        except OSError:
+            pass

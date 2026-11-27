@@ -268,3 +268,49 @@ def text_score(expected, seen_lines):
         return True, 1.0, []
     score = sum(d[2] for d in details) / len(details)
     return all(d[2] == 1.0 for d in details), score, details
+
+
+def source_words(lines):
+    """Text read from a picture that an edit should keep: lines with at least two letters or digits."""
+    return [ln for ln in lines if len(re.findall(r"[0-9A-Za-z]", ln)) >= 2]
+
+
+LOCATE_TEXT = ('Locate the text "{phrase}" in this picture (it may be spelled a little differently). '
+               'Report its bounding box as JSON: {{"bbox_2d": [x1, y1, x2, y2], "text": "..."}}')
+
+
+def locate_text(root, model, projector, picture, phrase, timeout=240):
+    """Where a piece of text is in a picture: (x0, y0, x1, y1) in the picture's pixels, or None.
+    Qwen3-VL answers in 0-1000 coordinates relative to the picture; numbers above 1000 are taken as pixels
+    of the copy it was shown."""
+    llama = root / "llm-bin" / "llama-mtmd-cli.exe"
+    with Image.open(picture) as im:
+        W, H = im.size
+    with tempfile.TemporaryDirectory() as tmp:
+        img = Path(tmp) / "picture.jpg"
+        img.write_bytes(small_copy(picture, 2048))
+        with Image.open(img) as sm:
+            sw, sh = sm.size
+        cmd = [str(llama), "-m", str(model), "--mmproj", str(projector), "--image", str(img),
+               "-p", LOCATE_TEXT.format(phrase=phrase.replace('"', "'")), "-ngl", "99", "--temp", "0",
+               "-n", "400", "-c", "8192", "--no-warmup"]
+        try:
+            run = subprocess.run(cmd, capture_output=True, timeout=timeout, cwd=str(root),
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            return None
+    text = run.stdout.decode("utf-8", "replace")
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1]
+    m = re.search(r"\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]", text)
+    if run.returncode != 0 or not m:
+        return None
+    x0, y0, x1, y1 = (float(v) for v in m.groups())
+    if max(x0, y0, x1, y1) > 1000:
+        sx, sy = W / sw, H / sh
+    else:
+        sx, sy = W / 1000, H / 1000
+    box = (round(min(x0, x1) * sx), round(min(y0, y1) * sy), round(max(x0, x1) * sx), round(max(y0, y1) * sy))
+    if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+        return None
+    return box

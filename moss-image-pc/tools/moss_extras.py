@@ -221,6 +221,75 @@ def upscale_current(app, factor):
     run_in_thread(app, lambda: G().upscale_picture(src, factor, lambda m: app.events.put(("status", m))), done, fail)
 
 
+# ---------------- fix the words in a finished picture ----------------
+
+def fix_words_dialog(app):
+    """Redraw just the misspelled words in the shown picture (a new copy is saved; the original is kept)."""
+    gm = G()
+    if not app.current:
+        messagebox.showinfo("Fix words", "Open or make a picture first.")
+        return
+    if not D.text_reader(gm.ROOT) or not gm.fixer_profile():
+        messagebox.showinfo("Fix words", "Fixing words needs Qwen Image (or another image model) and its Qwen3-VL "
+                                         "files on this PC. Run download-models.ps1 to get them.")
+        return
+    src = Path(app.current)
+    try:
+        prompt = M.read(src).get("comment", "")
+    except Exception:
+        prompt = ""
+    win, f = app.make_window("Fix words")
+    ttk.Label(f, text="What should the words say? One line for each piece of text, exactly as it should read. "
+                      "Only the wrong words are redrawn; the rest of the picture stays exactly as it is, and the "
+                      "result is saved as a new copy.", wraplength=520, justify="left").pack(anchor="w")
+    box = app.make_text(f, height=5, width=60, wrap="word", font=("Segoe UI", 10))
+    box.pack(fill="x", pady=(8, 0))
+    box.insert("1.0", "\n".join(D.quoted_text(prompt)))
+    note = ttk.Label(f, text=f"Redraws with {gm.PROFILES[gm.fixer_profile()]['name']}. About a minute for each "
+                             "wrong piece of text.", style="Hint.TLabel", wraplength=520)
+    note.pack(anchor="w", pady=(6, 0))
+    b = ttk.Frame(f)
+    b.pack(anchor="e", pady=(10, 0))
+
+    def go():
+        expected = [ln.strip() for ln in box.get("1.0", "end").splitlines() if ln.strip()]
+        if not expected:
+            messagebox.showinfo("Fix words", "Type the words the picture should show.", parent=win)
+            return
+        if not gpu_free(app, "fixing words"):
+            return
+        win.destroy()
+        out = gm.fix_name(src)
+        app.updating = True
+        app.progress.configure(mode="indeterminate")
+        app.progress.start(12)
+        say = lambda m: app.events.put(("status", m))  # noqa: E731
+
+        def work():
+            gm.fix_words(src, expected, say, out, prompt=prompt)
+            reader = D.text_reader(gm.ROOT)
+            seen = D.read_text_local(gm.ROOT, reader[0], reader[1], out)
+            return D.text_score(expected, seen) + (seen,)
+
+        def done(result):
+            ok, _score, _details, seen = result
+            app.updating = False
+            app.progress.stop()
+            app.status.configure(text=f"Saved {out.name}. " + ("Words checked: correct." if ok else
+                                 "Some words are still not right: it reads " + " / ".join(seen)[:100]))
+            app.show_picture(out)
+
+        def fail(msg):
+            app.updating = False
+            app.progress.stop()
+            app.status.configure(text="Fixing words didn't work.")
+            messagebox.showinfo("Fix words", msg)
+        run_in_thread(app, work, done, fail)
+
+    ttk.Button(b, text="Fix the words", command=go).pack(side="left")
+    ttk.Button(b, text="Cancel", command=win.destroy).pack(side="left", padx=(6, 0))
+
+
 # ---------------- wallpaper ----------------
 
 def _wallpaper():
@@ -1119,10 +1188,31 @@ def open_gallery(app):
     def load():
         run_in_thread(app, lambda: gallery_items(folder), lambda items: (state.update(items=items), render()))
 
+    def listing():
+        try:
+            return sorted((e.name, e.stat().st_mtime) for e in os.scandir(folder)
+                          if e.is_file() and e.name.lower().endswith((".png", ".jpg", ".jpeg"))
+                          and not e.name.endswith((".engine.png", ".tmp.png")) and "_part" not in e.name)
+        except OSError:
+            return []
+
+    def watch():
+        """New or changed pictures (made by the main window, wallpaper of the day, phone access or another
+        program) show up within a few seconds."""
+        if not win.winfo_exists():
+            return
+        now = listing()
+        if now != state.get("listing"):
+            if state.get("listing") is not None:
+                load()
+            state["listing"] = now
+        win.after(4000, watch)
+
     search.trace_add("write", lambda *a: render())
     model.bind("<<ComboboxSelected>>", lambda e: render())
     win.bind("<Destroy>", lambda e: e.widget is win and canvas.unbind_all("<MouseWheel>"))
     load()
+    watch()
 
 
 def edit_this(app, path):
