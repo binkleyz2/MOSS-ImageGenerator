@@ -20,6 +20,7 @@ $icon = Join-Path $tools 'moss.ico'
     --name 'MOSS Image Studio' `
     --icon $icon `
     --add-data "$icon;." `
+    --add-data "$(Join-Path $tools 'web');web" `
     --version-file (Join-Path $PSScriptRoot 'version_info.txt') `
     --paths $tools `
     --distpath (Join-Path $repo 'dist') `

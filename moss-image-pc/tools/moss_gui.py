@@ -7,6 +7,7 @@ Start it with the "MOSS Image Studio" shortcut (or app), or:
 It runs the image engine in bin (sd-cli) with the models in models.
 """
 import ctypes
+import itertools
 import json
 import os
 import queue
@@ -33,7 +34,7 @@ import moss_platform as P
 import moss_updates as U
 import moss_extras as X
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -165,6 +166,7 @@ DARK = dict(bg="#1f2023", field="#2b2d31", fg="#e8e8e8", hint="#a0a4ab", error="
 
 # ---------------- helpers ----------------
 
+QUEUE_IDS = itertools.count(1)    # an id for each queued request (phone access removes them by id)
 SPEED = {}        # model key -> how much slower (>1) or faster this computer is than the reference PC
 
 
@@ -1658,14 +1660,19 @@ class Studio:
                     adv=adv, label="",
                     text_check=self.text_check.get() and (bool(D.quoted_text(prompt)) or (editing and not mask)))
 
+    def memory_need(self, spec):
+        """(GB a request usually needs, GB the computer can promise now or None)."""
+        profile = PROFILES[spec["model"]]
+        files_gb = sum(p.stat().st_size for p in profile_files(profile, spec["editing"]) if p.exists()) / 2**30
+        need = files_gb * 1.1 + 3 * spec["w"] * spec["h"] / 1e6 + 1
+        return need, memory_free_gb()[1]
+
     def memory_ok(self, spec):
         """Warn before a big job if the computer can't promise enough memory (see memory_advice)."""
         profile = PROFILES[spec["model"]]
         if profile.get("cloud"):
             return True
-        files_gb = sum(p.stat().st_size for p in profile_files(profile, spec["editing"]) if p.exists()) / 2**30
-        need = files_gb * 1.1 + 3 * spec["w"] * spec["h"] / 1e6 + 1
-        ram, commit = memory_free_gb()
+        need, commit = self.memory_need(spec)
         if commit is None or commit >= need:
             return True
         return messagebox.askyesno(
@@ -1781,6 +1788,7 @@ class Studio:
         self.progress.start(12)
         self.status.configure(text=text)
         self.started = time.time()
+        P.keep_awake(True)
 
     def launch_failed(self, spec, message, interactive):
         if interactive:
@@ -1947,8 +1955,12 @@ class Studio:
                         self.progress.start(12)
                 elif kind == "done":
                     self.on_job_done(*data)
-                elif kind == "remote":
-                    X.remote_request(self, data)
+                elif kind == "call":                     # from phone access: run on this thread
+                    fn, box = data
+                    try:
+                        box.put(("ok", fn()))
+                    except Exception as e:
+                        box.put(("err", e))
                 elif kind == "updates":
                     if not self.job:
                         self.status.configure(text="Updates available: " + ", ".join(data)
@@ -1959,7 +1971,7 @@ class Studio:
         except queue.Empty:
             pass
         if getattr(self, "remote_server", None):
-            X.remote_tick(self)
+            self.remote_server.bridge.tick()
         if self.job:
             secs = int(time.time() - self.started)
             self.root.title(f"MOSS Image Studio - working {secs // 60}:{secs % 60:02d}")
@@ -2125,7 +2137,7 @@ class Studio:
 
     # ---------------- queue ----------------
     def queue_add(self, spec, label="", group=None):
-        spec = dict(spec, label=label, group=group)
+        spec = dict(spec, label=label, group=group, qid=next(QUEUE_IDS))
         self.queue.append(spec)
         if group:
             self.groups.setdefault(group, dict(total=0, results=[]))["total"] += 1
@@ -2151,8 +2163,6 @@ class Studio:
             self.queue_running = False
 
     def queue_result(self, spec, file, error):
-        if file:
-            X.remote_note_picture(self, file, (spec or {}).get("prompt", ""))
         if not spec:
             return
         self.queue_done.append((spec, file, error))
@@ -2171,6 +2181,7 @@ class Studio:
         self.go_btn.state(["!disabled"])
         self.cancel_btn.state(["disabled"])
         self.root.title("MOSS Image Studio")
+        P.keep_awake(False)
 
     def cancel(self):
         job = self.job
@@ -2732,9 +2743,20 @@ class Studio:
             return
         subprocess.Popen([sys.executable] + ([] if FROZEN else [str(Path(__file__).resolve())]),
                          cwd=str(Path(sys.executable).parent), creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        self.closing = True
         self.on_close()
 
     def on_close(self):
+        if getattr(self, "remote_server", None) and not getattr(self, "closing", False):
+            answer = messagebox.askyesnocancel(
+                "MOSS Image Studio", "Phone access is on: phones can only use this computer while the app is open."
+                "\n\nMinimize the app instead of closing it?\n\nYes: minimize (phones keep working)\n"
+                "No: close (phone access stops)")
+            if answer is None:
+                return
+            if answer:
+                self.root.iconify()
+                return
         if self.job and not messagebox.askyesno("MOSS Image Studio", "A picture is still being made. Stop it and close?"):
             return
         self.cancel()
@@ -2818,6 +2840,8 @@ def main():
         wallpaper_of_the_day(root)
     else:
         Studio(root)
+        if "--minimized" in sys.argv:          # started at sign-in for phone access
+            root.iconify()
     root.mainloop()
 
 

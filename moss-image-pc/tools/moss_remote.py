@@ -1,26 +1,30 @@
-"""Phone access for MOSS Image Studio: a small password-protected web page served by the app.
+"""Phone access for MOSS Image Studio: a password-protected web app served by the running app, so a phone or
+tablet on the same network (or over a WireGuard tunnel) can use this computer's graphics card.
 
-Off by default. When turned on it listens either on this PC only (127.0.0.1) or on all network
-addresses (for phones on the same network or over a WireGuard tunnel). Plain HTTP: use it on a
-trusted network or through the tunnel, not over the open internet.
+Off by default. When turned on it listens either on this computer only (127.0.0.1) or on all network addresses.
+Plain HTTP: use it on a trusted network or through the tunnel, not over the open internet.
 
-The server never touches the window directly; it talks to the app through a small `bridge`:
-  bridge.state()         -> dict for /api/status (built on the window thread)
-  bridge.submit(params)  -> queues a picture request
-  bridge.picture(name, thumb) -> Path of a recent picture or None
-  bridge.options()       -> models, shapes and sizes for the form
+This module is only the web server: sign-in, sessions, static files and routing. Everything the phone can see
+or do is in moss_phone.Bridge, which runs it against the open window.
 """
 import hashlib
 import hmac
 import json
+import mimetypes
 import secrets
 import threading
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
-SESSION_HOURS = 12
+SESSION_DAYS = 30                  # a phone stays signed in this long
+MAX_UPLOAD = 60 * 2**20            # photos from a phone
+MAX_BODY = 16 * 2**20              # everything else (a painted area is sent with the request)
+STATIC = {"/app.js": "app.js", "/style.css": "style.css", "/manifest.webmanifest": "manifest.webmanifest",
+          "/icon-192.png": "icon-192.png", "/icon-512.png": "icon-512.png",
+          "/apple-touch-icon.png": "apple-touch-icon.png", "/favicon.ico": "icon-192.png"}
 
 
 def hash_password(password, salt=None):
@@ -33,65 +37,36 @@ def check_password(password, salt, digest):
     return hmac.compare_digest(hash_password(password, salt)[1], digest)
 
 
-PAGE_LOGIN = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,
-initial-scale=1"><title>MOSS Image Studio</title><link rel="stylesheet" href="/style.css"></head><body>
-<main><h1>MOSS Image Studio</h1><form method="post" action="/login"><label>Password
-<input type="password" name="password" autofocus autocomplete="current-password"></label>
-<button>Sign in</button></form><p class="msg">{msg}</p></main></body></html>"""
+def _hash_token(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-PAGE_APP = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,
-initial-scale=1"><title>MOSS Image Studio</title><link rel="stylesheet" href="/style.css"></head>
-<body data-csrf="{csrf}"><main><h1>MOSS Image Studio</h1>
-<label>What do you want to see?<textarea id="prompt" rows="5"></textarea></label>
-<div class="row"><label>Model<select id="model"></select></label>
-<label>Shape<select id="shape"></select></label><label>Size<select id="tier"></select></label></div>
-<button id="go">Make picture</button><p id="status" class="msg"></p>
-<h2>Recent pictures</h2><div id="recent"></div>
-<form method="post" action="/logout"><button class="quiet">Sign out</button></form></main>
-<script src="/app.js"></script></body></html>"""
 
-STYLE = """:root{color-scheme:light dark;--bg:#f3f4f6;--card:#fff;--fg:#1d1f23;--muted:#666;--accent:#0067c0}
-@media (prefers-color-scheme:dark){:root{--bg:#1f2023;--card:#2b2d31;--fg:#e8e8e8;--muted:#a0a4ab;--accent:#4c8dff}}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,Segoe UI,sans-serif}
-main{max-width:720px;margin:0 auto;padding:16px}h1{font-size:1.3rem}h2{font-size:1.05rem;margin-top:24px}
-label{display:block;margin:10px 0;color:var(--muted)}textarea,select,input{display:block;width:100%;box-sizing:border-box;
-margin-top:4px;padding:10px;border-radius:8px;border:1px solid #888;background:var(--card);color:var(--fg);font-size:16px}
-.row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}button{background:var(--accent);color:#fff;border:0;
-border-radius:8px;padding:12px 18px;font-size:16px;margin-top:8px}button.quiet{background:transparent;color:var(--muted);
-padding:8px 0}.msg{color:var(--muted)}#recent{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
-gap:8px}#recent a{display:block}#recent img{width:100%;border-radius:6px;display:block}#recent span{font-size:12px;
-color:var(--muted)}@media (max-width:480px){.row{grid-template-columns:1fr}}"""
-
-SCRIPT = """const csrf=document.body.dataset.csrf;const $=id=>document.getElementById(id);
-function fill(sel,items){sel.innerHTML='';for(const [v,t] of items){const o=document.createElement('option');
-o.value=v;o.textContent=t;sel.appendChild(o);}}
-async function options(){const r=await fetch('/api/options');const d=await r.json();fill($('model'),d.models);
-fill($('shape'),d.shapes);fill($('tier'),d.tiers);if(d.model)$('model').value=d.model;}
-async function status(){try{const r=await fetch('/api/status');if(r.status==401){location.reload();return;}
-const d=await r.json();$('status').textContent=d.status+(d.waiting?` (${d.waiting} waiting)`:'');
-const box=$('recent');box.innerHTML='';for(const p of d.recent){const a=document.createElement('a');
-a.href='/pic/'+encodeURIComponent(p.name);a.target='_blank';const img=document.createElement('img');
-img.src='/pic/'+encodeURIComponent(p.name)+'?thumb=1';img.alt=p.prompt;img.loading='lazy';const s=document.createElement('span');
-s.textContent=p.prompt.slice(0,80);a.appendChild(img);a.appendChild(s);box.appendChild(a);}}catch(e){}}
-$('go').onclick=async()=>{const prompt=$('prompt').value.trim();if(!prompt){$('status').textContent='Type a prompt first.';return;}
-$('go').disabled=true;const r=await fetch('/api/make',{method:'POST',headers:{'Content-Type':'application/json',
-'X-CSRF-Token':csrf},body:JSON.stringify({prompt,model:$('model').value,shape:$('shape').value,tier:+$('tier').value})});
-const d=await r.json();$('status').textContent=d.message||'';$('go').disabled=false;status();};
-options();status();setInterval(status,4000);"""
+LOGIN = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="MOSS Studio"><meta name="theme-color" content="#16181c">
+<link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<title>MOSS Image Studio</title><link rel="stylesheet" href="/style.css"></head>
+<body class="login"><main class="login-box"><img src="/icon-192.png" alt="" class="login-icon">
+<h1>MOSS Image Studio</h1><p class="muted">Sign in with the phone access password you set on the computer.</p>
+<form method="post" action="/login"><label>Password
+<input type="password" name="password" autofocus autocomplete="current-password" required></label>
+<button class="primary wide">Sign in</button></form><p class="error">{msg}</p></main></body></html>"""
 
 
 class RemoteServer:
-    def __init__(self, bridge, host, port, salt, digest):
+    def __init__(self, bridge, host, port, salt, digest, web_dir, sessions_file=None):
         self.bridge, self.host, self.port = bridge, host, port
         self.salt, self.digest = salt, digest
-        self.sessions = {}            # token -> (csrf, expires)
-        self.failures = {}            # ip -> [times]
+        self.web_dir = Path(web_dir)
+        self.sessions_file = Path(sessions_file) if sessions_file else None
+        self.sessions = self._load_sessions()      # sha256(token) -> [csrf, expires]
+        self.failures = {}                          # ip -> [times]
         self.lock = threading.Lock()
         self.httpd = None
 
     def start(self):
-        server = self
-        handler = type("Handler", (_Handler,), {"server_app": server})
+        handler = type("Handler", (_Handler,), {"server_app": self})
         self.httpd = ThreadingHTTPServer((self.host, self.port), handler)
         self.httpd.daemon_threads = True
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -102,20 +77,47 @@ class RemoteServer:
             self.httpd.server_close()
             self.httpd = None
 
-    # sessions
+    # ---- sessions (kept in a file so phones stay signed in when the app restarts) ----
+    def _load_sessions(self):
+        try:
+            data = json.loads(self.sessions_file.read_text(encoding="utf-8"))
+            now = time.time()
+            return {k: v for k, v in data.items() if v[1] > now}
+        except Exception:
+            return {}
+
+    def _save_sessions(self):
+        if not self.sessions_file:
+            return
+        try:
+            self.sessions_file.write_text(json.dumps(self.sessions), encoding="utf-8")
+        except OSError:
+            pass
+
     def new_session(self):
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
         with self.lock:
-            self.sessions[token] = (csrf, time.time() + SESSION_HOURS * 3600)
+            self.sessions[_hash_token(token)] = [csrf, time.time() + SESSION_DAYS * 86400]
+            self._save_sessions()
         return token, csrf
 
     def session(self, token):
+        if not token:
+            return None
+        key = _hash_token(token)
         with self.lock:
-            entry = self.sessions.get(token or "")
+            entry = self.sessions.get(key)
             if entry and entry[1] > time.time():
                 return entry
-            self.sessions.pop(token or "", None)
+            if self.sessions.pop(key, None):
+                self._save_sessions()
             return None
+
+    def end_session(self, token):
+        if token:
+            with self.lock:
+                self.sessions.pop(_hash_token(token), None)
+                self._save_sessions()
 
     def too_many_failures(self, ip):
         now = time.time()
@@ -129,30 +131,39 @@ class RemoteServer:
             self.failures.setdefault(ip, []).append(time.time())
 
 
+class ApiError(Exception):
+    def __init__(self, message, code=400, **extra):
+        super().__init__(message)
+        self.code, self.extra = code, extra
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_app = None
     server_version = "MOSS-Image-Studio"
     sys_version = ""
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, *args):
         pass
 
-    # helpers
-    def _send(self, code, body, ctype="text/html; charset=utf-8", headers=None):
+    # ---- helpers ----
+    def _send(self, code, body, ctype="text/html; charset=utf-8", headers=None, cache=None):
         data = body if isinstance(body, bytes) else body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache or "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self'; style-src 'self'; "
-                                                    "script-src 'self'; form-action 'self'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; "
+                         "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def _json(self, code, obj):
         self._send(code, json.dumps(obj), "application/json")
@@ -161,81 +172,146 @@ class _Handler(BaseHTTPRequestHandler):
         cookie = SimpleCookie(self.headers.get("Cookie", ""))
         return cookie["moss_session"].value if "moss_session" in cookie else None
 
-    def _session(self):
-        return self.server_app.session(self._token())
-
-    def _body(self, limit=200_000):
+    def _body(self, limit):
         length = int(self.headers.get("Content-Length") or 0)
         if length > limit:
-            raise ValueError("request too large")
-        return self.rfile.read(length)
+            # read and drop it so the connection stays usable, then refuse
+            remaining = length
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+            raise ApiError("That's too big to send.", 413)
+        return self.rfile.read(length) if length else b""
 
-    # routes
+    def _static(self, name):
+        path = self.server_app.web_dir / name
+        if not path.is_file():
+            return self._send(404, "Not found", "text/plain")
+        ctype = {".js": "application/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+                 ".webmanifest": "application/manifest+json", ".png": "image/png",
+                 ".html": "text/html; charset=utf-8"}.get(path.suffix, "application/octet-stream")
+        return self._send(200, path.read_bytes(), ctype, cache="no-cache")
+
+    def _file(self, path, download=False, cache="private, max-age=604800"):
+        if not path:
+            return self._send(404, "Not found", "text/plain")
+        ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        headers = {}
+        if download:
+            safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in path.name)
+            headers["Content-Disposition"] = f'attachment; filename="{safe}"'
+        return self._send(200, path.read_bytes(), ctype, headers, cache=cache)
+
+    # ---- routes ----
+    def do_HEAD(self):
+        self.do_GET()
+
     def do_GET(self):
+        try:
+            self._get()
+        except ApiError as e:
+            self._json(e.code, dict(message=str(e), **e.extra))
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:                         # never let one request take the server down
+            try:
+                self._json(500, {"message": f"Something went wrong on the computer: {e}"})
+            except Exception:
+                pass
+
+    def _get(self):
         url = urlparse(self.path)
         app = self.server_app
-        if url.path == "/style.css":
-            return self._send(200, STYLE, "text/css")
-        if url.path == "/app.js":
-            return self._send(200, SCRIPT, "application/javascript")
-        sess = self._session()
-        if url.path == "/":
+        if url.path in STATIC:
+            return self._static(STATIC[url.path])
+        sess = app.session(self._token())
+        if url.path in ("/", "/index.html"):
             if not sess:
-                return self._send(200, PAGE_LOGIN.format(msg=""))
-            return self._send(200, PAGE_APP.format(csrf=sess[0]))
+                return self._send(200, LOGIN.format(msg=""))
+            page = (app.web_dir / "index.html").read_text(encoding="utf-8").replace("{{csrf}}", sess[0])
+            return self._send(200, page)
         if not sess:
             return self._json(401, {"message": "Sign in first."})
-        if url.path == "/api/status":
-            return self._json(200, app.bridge.state())
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        b = app.bridge
+        if url.path == "/api/state":
+            return self._json(200, b.state())
         if url.path == "/api/options":
-            return self._json(200, app.bridge.options())
-        if url.path.startswith("/pic/"):
-            from urllib.parse import unquote
-            name = unquote(url.path[len("/pic/"):])
-            path = app.bridge.picture(name, "thumb" in parse_qs(url.query))
-            if not path:
-                return self._send(404, "Not found", "text/plain")
-            ctype = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
-            return self._send(200, path.read_bytes(), ctype)
+            return self._json(200, b.options())
+        if url.path == "/api/gallery":
+            return self._json(200, b.gallery(q.get("q", ""), int(q.get("offset", 0) or 0),
+                                             int(q.get("limit", 60) or 60)))
+        if url.path == "/api/info":
+            return self._json(200, b.info(q.get("name", "")))
+        if url.path == "/api/estimate":
+            return self._json(200, b.estimate(q))
+        if url.path == "/api/tokens":
+            return self._json(200, {"tokens": b.tokens(q.get("text", ""))})
+        if url.path == "/api/task":
+            return self._json(200, b.task(q.get("id", "")))
+        for prefix, kind in (("/pic/", "full"), ("/view/", "view"), ("/thumb/", "thumb")):
+            if url.path.startswith(prefix):
+                name = unquote(url.path[len(prefix):])
+                return self._file(b.picture(name, kind), download="download" in q,
+                                  cache="private, no-cache" if kind == "full" else "private, max-age=604800")
         return self._send(404, "Not found", "text/plain")
 
     def do_POST(self):
+        try:
+            self._post()
+        except ApiError as e:
+            self._json(e.code, dict(message=str(e), **e.extra))
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            try:
+                self._json(500, {"message": f"Something went wrong on the computer: {e}"})
+            except Exception:
+                pass
+
+    def _post(self):
         url = urlparse(self.path)
         app = self.server_app
         ip = self.client_address[0]
-        try:
-            body = self._body()
-        except ValueError:
-            return self._send(413, "Too large", "text/plain")
         if url.path == "/login":
+            body = self._body(10_000)
             if app.too_many_failures(ip):
-                return self._send(429, PAGE_LOGIN.format(msg="Too many tries. Wait 10 minutes."))
+                return self._send(429, LOGIN.format(msg="Too many tries. Wait 10 minutes."))
             password = parse_qs(body.decode("utf-8", "replace")).get("password", [""])[0]
             if not check_password(password, app.salt, app.digest):
                 app.failed(ip)
                 time.sleep(1)
-                return self._send(401, PAGE_LOGIN.format(msg="Wrong password."))
+                return self._send(401, LOGIN.format(msg="Wrong password."))
             token, _ = app.new_session()
             return self._send(303, "", headers={"Location": "/", "Set-Cookie":
-                              f"moss_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_HOURS * 3600}"})
+                              f"moss_session={token}; HttpOnly; SameSite=Strict; Path=/; "
+                              f"Max-Age={SESSION_DAYS * 86400}"})
         if url.path == "/logout":
-            with app.lock:
-                app.sessions.pop(self._token() or "", None)
+            self._body(10_000)
+            app.end_session(self._token())
             return self._send(303, "", headers={"Location": "/", "Set-Cookie": "moss_session=; Max-Age=0; Path=/"})
-        sess = self._session()
+        sess = app.session(self._token())
         if not sess:
+            self._body(MAX_UPLOAD)
             return self._json(401, {"message": "Sign in first."})
-        if self.headers.get("X-CSRF-Token") != sess[0]:
+        if not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), sess[0]):
+            self._body(MAX_UPLOAD)
             return self._json(403, {"message": "Please reload the page."})
-        if url.path == "/api/make":
-            try:
-                params = json.loads(body.decode("utf-8"))
-            except Exception:
-                return self._json(400, {"message": "Bad request."})
-            prompt = str(params.get("prompt", "")).strip()[:4000]
-            if not prompt:
-                return self._json(400, {"message": "Type a prompt first."})
-            message = app.bridge.submit(dict(prompt=prompt, model=str(params.get("model", "")),
-                                             shape=str(params.get("shape", "")), tier=int(params.get("tier", 0))))
-            return self._json(200, {"message": message})
-        return self._json(404, {"message": "Not found"})
+        b = app.bridge
+        if url.path == "/api/upload":
+            return self._json(200, b.upload(self._body(MAX_UPLOAD)))
+        try:
+            params = json.loads(self._body(MAX_BODY).decode("utf-8") or "{}")
+            if not isinstance(params, dict):
+                raise ValueError
+        except ValueError:
+            raise ApiError("Bad request.") from None
+        routes = {"/api/make": b.make, "/api/cancel": b.cancel, "/api/queue": b.queue_action,
+                  "/api/task": b.start_task, "/api/delete": b.delete, "/api/wallpaper": b.wallpaper,
+                  "/api/wallpaper-restore": b.wallpaper_restore}
+        fn = routes.get(url.path)
+        if not fn:
+            return self._json(404, {"message": "Not found"})
+        return self._json(200, fn(params))

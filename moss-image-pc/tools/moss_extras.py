@@ -60,6 +60,10 @@ def run_in_thread(app, work, done, error=None):
 
 
 def gpu_free(app, what):
+    if getattr(app, "updating", False) and not app.job:
+        messagebox.showinfo("MOSS Image Studio", f"The graphics card is busy (an upscale, a word fix or a phone "
+                                                 f"request); {what} needs it too. Try again when it's done.")
+        return False
     if app.job:
         messagebox.showinfo("MOSS Image Studio", f"A picture is being made right now; {what} needs the graphics "
                                                  "card too. Try again when it's done.")
@@ -1232,98 +1236,43 @@ def local_addresses():
             found.add(info[4][0])
     except OSError:
         pass
-    return sorted(a for a in found if not a.startswith("127."))
-
-
-class Bridge:
-    """What the phone page may see and do. Everything it reads is prepared on the window's thread."""
-
-    def __init__(self, app):
-        self.app = app
-
-    def state(self):
-        return dict(getattr(self.app, "remote_state", {}))
-
-    def options(self):
-        return dict(getattr(self.app, "remote_options", {}))
-
-    def submit(self, params):
-        self.app.events.put(("remote", params))
-        return "Added to the queue. It will appear under Recent pictures when it's done."
-
-    def picture(self, name, thumb):
-        recent = {p["name"]: p["path"] for p in getattr(self.app, "remote_recent", [])}
-        path = recent.get(name)
-        if not path or not Path(path).exists():
-            return None
-        return thumbnail(Path(path), 320) if thumb else Path(path)
-
-
-def remote_tick(app):
-    """Called on the window's thread a few times a second: refresh what the phone page can read."""
-    try:
-        app.remote_state = dict(status=app.status.cget("text"), busy=bool(app.job), waiting=len(app.queue),
-                                recent=[dict(name=p["name"], prompt=p["prompt"]) for p in app.remote_recent[:24]])
-    except Exception:
+    try:                                    # the address used to reach the network (works when the above doesn't)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))      # a documentation-only address: nothing is sent
+            found.add(s.getsockname()[0])
+    except OSError:
         pass
+    return sorted(a for a in found if not a.startswith(("127.", "169.254.")))
 
 
-def remote_note_picture(app, path, prompt):
-    if not hasattr(app, "remote_recent"):
-        return
-    app.remote_recent = [p for p in app.remote_recent if p["name"] != Path(path).name]
-    app.remote_recent.insert(0, dict(name=Path(path).name, path=str(path), prompt=prompt))
-    app.remote_recent = app.remote_recent[:48]
+def sessions_file():
+    return G().HERE / "phone_sessions.json"
 
 
-def remote_request(app, params):
-    """A picture request from the phone page (window thread)."""
-    gm = G()
-    key = params.get("model")
-    if key not in gm.PROFILES:
-        return
-    p = gm.PROFILES[key]
-    if p.get("cloud") and not (C.find_key(app.settings) and app.settings.get("cloud_ok")):
-        app.status.configure(text="Phone request skipped: Nano Banana isn't set up in the window yet.")
-        return
-    if not p.get("cloud") and app.missing_files(key):
-        app.status.configure(text=f"Phone request skipped: {p['name']} isn't downloaded.")
-        return
-    shape = params.get("shape") if (params.get("shape") in gm.ASPECTS or params.get("shape") in app.screen_opts) \
-        else "16:9 wide"
-    tier = max(0, min(len(gm.TIERS) - 1, int(params.get("tier", 0))))
-    w, h, screen = size_for(app, key, shape, tier)
-    spec = base_spec(app, key, params["prompt"], w, h, screen=screen, shape=shape, tier=gm.TIERS[tier],
-                     label="from phone: " + params["prompt"][:30],
-                     seed="n/a" if p.get("cloud") else "random")
-    app.queue_add(spec, label=spec["label"])
-    app.status.configure(text=f"Phone request added ({len(app.queue)} waiting).")
-    app.queue_start()
+def login_args():
+    """How to start the app minimized at sign-in (for phone access)."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--minimized"]
+    python = Path(sys.executable)
+    if P.IS_WIN and (python.parent / "pythonw.exe").exists():
+        python = python.parent / "pythonw.exe"       # no console window
+    return [str(python), str(Path(__file__).resolve().parent / "moss_gui.py"), "--minimized"]
 
 
 def start_remote(app):
+    import moss_phone
     import moss_remote as R
     stop_remote(app)
     cfg = app.settings.get("remote", {})
     if not cfg.get("enabled") or not cfg.get("digest"):
         return None
-    gm = G()
     host = "0.0.0.0" if cfg.get("scope") == "network" else "127.0.0.1"
     port = int(cfg.get("port", 8780))
-    try:
-        app.remote_recent = [dict(name=it["path"].name, path=str(it["path"]), prompt=it["prompt"])
-                             for it in gallery_items(Path(app.out_dir.get() or gm.DEFAULT_OUT))[:24]]
-    except Exception:
-        app.remote_recent = []
-    models = [(k, p["name"]) for k, p in gm.PROFILES.items()
-              if (C.find_key(app.settings) if p.get("cloud") else not app.missing_files(k))]
-    shapes = [(k, k) for k in gm.ASPECTS] + [(k, k) for k in app.screen_opts]
-    app.remote_options = dict(models=models, shapes=shapes, tiers=[[i, t] for i, t in enumerate(gm.TIERS)],
-                              model=app.model_key)
-    remote_tick(app)
-    server = R.RemoteServer(Bridge(app), host, port, cfg["salt"], cfg["digest"])
+    bridge = moss_phone.Bridge(app)
+    server = R.RemoteServer(bridge, host, port, cfg["salt"], cfg["digest"], moss_phone.web_dir(), sessions_file())
     server.start()
     app.remote_server = server
+    bridge.tick()
     return host, port
 
 
@@ -1337,22 +1286,29 @@ def stop_remote(app):
         app.remote_server = None
 
 
+def phone_urls(server):
+    if server.host == "127.0.0.1":
+        return [f"http://127.0.0.1:{server.port}/"]
+    return [f"http://{a}:{server.port}/" for a in local_addresses()] or [f"http://<this computer's address>:{server.port}/"]
+
+
 def open_remote(app):
     import moss_remote as R
     cfg = dict(enabled=False, scope="network", port=8780)
     cfg.update(app.settings.get("remote", {}))
     win, f = app.make_window("Phone access")
-    ttk.Label(f, text="Lets you make pictures from your phone's web browser while this app is open on your PC. "
+    ttk.Label(f, text="Use MOSS Image Studio from your phone or tablet: make and edit pictures (including photos "
+                      "from the phone), watch the queue and browse the gallery in its web browser. Everything still "
+                      "runs on this computer's graphics card, so the app must be open here (it can be minimized). "
                       "Use it on your home network or through your WireGuard tunnel; it isn't meant for the open "
-                      "internet. Pictures still run on this PC.", wraplength=560, justify="left").grid(
-        row=0, column=0, columnspan=3, sticky="w")
+                      "internet.", wraplength=580, justify="left").grid(row=0, column=0, columnspan=3, sticky="w")
     enabled = tk.BooleanVar(value=cfg["enabled"])
     ttk.Checkbutton(f, text="Turn on phone access", variable=enabled).grid(row=1, column=0, columnspan=3, sticky="w",
                                                                          pady=(10, 0))
     scope = tk.StringVar(value=cfg["scope"])
     ttk.Radiobutton(f, text="Phones on my network or WireGuard can connect", value="network",
                     variable=scope).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
-    ttk.Radiobutton(f, text="Only this PC (for testing)", value="pc", variable=scope).grid(
+    ttk.Radiobutton(f, text="Only this computer (for testing)", value="pc", variable=scope).grid(
         row=3, column=0, columnspan=3, sticky="w")
     ttk.Label(f, text="Port").grid(row=4, column=0, sticky="w", pady=(8, 0))
     port = tk.IntVar(value=cfg["port"])
@@ -1362,23 +1318,47 @@ def open_remote(app):
     pw1, pw2 = tk.StringVar(), tk.StringVar()
     ttk.Entry(f, textvariable=pw1, show="*", width=30).grid(row=6, column=0, columnspan=2, sticky="w")
     ttk.Entry(f, textvariable=pw2, show="*", width=30).grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
-    ttk.Label(f, text="(type it twice)", style="Hint.TLabel").grid(row=7, column=2, sticky="w")
-    where = ttk.Label(f, text="", wraplength=560, justify="left")
-    where.grid(row=8, column=0, columnspan=3, sticky="w", pady=(10, 0))
+    ttk.Label(f, text="(type it twice; changing it signs out every phone)", style="Hint.TLabel").grid(
+        row=7, column=2, sticky="w")
+    at_login = tk.BooleanVar(value=P.starts_at_login())
+    ttk.Checkbutton(f, text=f"Start minimized when I sign in to {P.OS_NAME}", variable=at_login).grid(
+        row=8, column=0, columnspan=3, sticky="w", pady=(10, 0))
+    ttk.Label(f, text="So phones can use it any time this computer is on, without opening the app first.",
+              style="Hint.TLabel", wraplength=560).grid(row=9, column=0, columnspan=3, sticky="w", padx=(24, 0))
+    where = ttk.Label(f, text="", wraplength=580, justify="left")
+    where.grid(row=10, column=0, columnspan=3, sticky="w", pady=(10, 0))
+    tip = ttk.Label(f, text="", style="Hint.TLabel", wraplength=580, justify="left")
+    tip.grid(row=11, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def show_where():
         server = getattr(app, "remote_server", None)
         if not server:
             where.configure(text="Phone access is off.")
+            tip.configure(text="")
             return
-        if server.host == "127.0.0.1":
-            urls = [f"http://127.0.0.1:{server.port}/"]
-        else:
-            urls = [f"http://{a}:{server.port}/" for a in local_addresses()] or [f"http://<this PC's address>:{server.port}/"]
-        where.configure(text="On. Open one of these on your phone:\n  " + "\n  ".join(urls) +
-                        (("\n\nIf Windows asks whether to allow network access, allow it on private networks."
-                          if P.IS_WIN else "\n\nIf macOS asks whether to accept incoming network connections, "
-                          "click Allow.") if server.host != "127.0.0.1" else ""))
+        where.configure(text="On. Open this on your phone (and add it to the home screen for an app icon):\n  " +
+                        "\n  ".join(phone_urls(server)))
+        tip.configure(text=(
+            ("If Windows asks whether to allow network access, allow it on private networks. " if P.IS_WIN else
+             "If macOS asks whether to accept incoming network connections, click Allow. ")
+            if server.host != "127.0.0.1" else "") +
+            "Phones can reach this computer only while it's awake: the app keeps it awake while a picture is being "
+            f"made, but {P.OS_NAME}'s sleep settings decide the rest of the time.")
+
+    def copy_address():
+        server = getattr(app, "remote_server", None)
+        if server:
+            app.root.clipboard_clear()
+            app.root.clipboard_append(phone_urls(server)[0])
+
+    def sign_out_all():
+        try:
+            sessions_file().unlink(missing_ok=True)
+        except OSError:
+            pass
+        if getattr(app, "remote_server", None):
+            start_remote(app)
+        messagebox.showinfo("Phone access", "Every phone is signed out. They'll need the password again.", parent=win)
 
     def save():
         new = dict(cfg, enabled=enabled.get(), scope=scope.get())
@@ -1389,6 +1369,7 @@ def open_remote(app):
         except (tk.TclError, ValueError):
             messagebox.showinfo("Phone access", "Use a port between 1024 and 65535.", parent=win)
             return
+        changed_password = False
         if pw1.get() or pw2.get():
             if pw1.get() != pw2.get():
                 messagebox.showinfo("Phone access", "The two passwords don't match.", parent=win)
@@ -1397,13 +1378,21 @@ def open_remote(app):
                 messagebox.showinfo("Phone access", "Use at least 8 characters.", parent=win)
                 return
             new["salt"], new["digest"] = R.hash_password(pw1.get())
+            changed_password = True
         if new["enabled"] and not new.get("digest"):
             messagebox.showinfo("Phone access", "Set a password first.", parent=win)
             return
+        if at_login.get() != P.starts_at_login():
+            try:
+                P.start_at_login(at_login.get(), login_args())
+            except Exception as e:
+                messagebox.showerror("Phone access", f"Couldn't change starting at sign-in: {e}", parent=win)
         app.settings["remote"] = new
         app.save_settings()
         pw1.set("")
         pw2.set("")
+        if changed_password:
+            sessions_file().unlink(missing_ok=True)
         try:
             start_remote(app) if new["enabled"] else stop_remote(app)
         except OSError as e:
@@ -1411,9 +1400,11 @@ def open_remote(app):
         show_where()
 
     b = ttk.Frame(f)
-    b.grid(row=9, column=0, columnspan=3, sticky="e", pady=(10, 0))
-    ttk.Button(b, text="Save", command=save).pack(side="left")
-    ttk.Button(b, text="Close", command=win.destroy).pack(side="left", padx=(6, 0))
+    b.grid(row=12, column=0, columnspan=3, sticky="we", pady=(12, 0))
+    ttk.Button(b, text="Copy address", command=copy_address).pack(side="left")
+    ttk.Button(b, text="Sign out all phones", command=sign_out_all).pack(side="left", padx=(6, 0))
+    ttk.Button(b, text="Close", command=win.destroy).pack(side="right")
+    ttk.Button(b, text="Save", command=save).pack(side="right", padx=(0, 6))
     show_where()
 
 

@@ -364,6 +364,103 @@ def schedule_daily(enabled, at, args):
         raise RuntimeError((run.stderr or run.stdout or "launchctl failed").strip())
 
 
+# ---------------- start at sign-in (for phone access) ----------------
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = "MOSS Image Studio"
+LOGIN_LABEL = "com.moss-image-studio.login"
+
+
+def login_plist(args):
+    import plistlib
+    return plistlib.dumps(dict(Label=LOGIN_LABEL, ProgramArguments=[str(a) for a in args], RunAtLoad=True,
+                               ProcessType="Interactive"))
+
+
+def start_at_login(enabled, args):
+    """Start the app (minimized) when the user signs in, or stop doing so (only when the user asks).
+    Windows: the user's Run key. macOS: a launch agent that runs at login."""
+    if IS_WIN:
+        import winreg
+        command = " ".join(str(a) if str(a).startswith("--") else f'"{a}"' for a in args)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if enabled:
+                winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, command)
+            else:
+                try:
+                    winreg.DeleteValue(k, RUN_VALUE)
+                except FileNotFoundError:
+                    pass
+        return
+    plist = Path.home() / "Library" / "LaunchAgents" / f"{LOGIN_LABEL}.plist"
+    if enabled:
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_bytes(login_plist(args))       # launchd reads it at the next login
+    else:
+        plist.unlink(missing_ok=True)
+
+
+def starts_at_login():
+    if IS_WIN:
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+                winreg.QueryValueEx(k, RUN_VALUE)
+            return True
+        except OSError:
+            return False
+    return (Path.home() / "Library" / "LaunchAgents" / f"{LOGIN_LABEL}.plist").exists()
+
+
+# ---------------- keep the computer awake while a picture is made ----------------
+_awake = {"on": False, "proc": None}
+
+
+def keep_awake(on):
+    """Stop the computer going to sleep mid-picture (pictures started from a phone run unattended).
+    The screen may still turn off. Call from the window's thread."""
+    if on == _awake["on"]:
+        return
+    _awake["on"] = on
+    try:
+        if IS_WIN:
+            ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+        elif IS_MAC:
+            if on:
+                _awake["proc"] = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
+            elif _awake["proc"]:
+                _awake["proc"].terminate()
+                _awake["proc"] = None
+    except Exception:
+        pass
+
+
+# ---------------- Recycle Bin / Trash ----------------
+
+def move_to_trash(path):
+    """Move a file to the Recycle Bin (Windows) or the Trash (macOS), so it can be put back."""
+    path = Path(path).resolve()
+    if IS_WIN:
+        from ctypes import wintypes
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [("hwnd", wintypes.HWND), ("wFunc", ctypes.c_uint), ("pFrom", wintypes.LPCWSTR),
+                        ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                        ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+        FO_DELETE, FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO, FOF_NOERRORUI = 3, 0x4, 0x10, 0x40, 0x400
+        op = SHFILEOPSTRUCTW(None, FO_DELETE, str(path) + "\0", None,
+                             FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI, False, None, None)
+        code = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+        if code or op.fAnyOperationsAborted:
+            raise OSError(f"Couldn't move {path.name} to the Recycle Bin (code {code}).")
+        return
+    from Foundation import NSURL, NSFileManager
+    ok, _url, err = NSFileManager.defaultManager().trashItemAtURL_resultingItemURL_error_(
+        NSURL.fileURLWithPath_(str(path)), None, None)
+    if not ok:
+        raise OSError(f"Couldn't move {path.name} to the Trash: {err}")
+
+
 # ---------------- Tk colours and themes ----------------
 LIGHT_THEMES = ["vista", "clam"] if IS_WIN else ["aqua", "clam"]
 WINDOW_BG = "SystemButtonFace" if IS_WIN else "systemWindowBackgroundColor"

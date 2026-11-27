@@ -177,6 +177,25 @@ def check(all_models=False):
     except Exception as e:
         problem(f"reading the desktop pictures: {e}")
 
+    try:      # phone access: serve the phone app on this Mac only, on a free port, and fetch two files
+        import urllib.request
+        import moss_phone
+        import moss_remote as R
+        salt, digest = R.hash_password("self-check")
+        server = R.RemoteServer(None, "127.0.0.1", 0, salt, digest, moss_phone.web_dir())
+        server.start()
+        port = server.httpd.server_address[1]
+        codes = []
+        for path in ("/", "/app.js"):
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
+                codes.append(r.status)
+        server.stop()
+        note(f"Phone access web server: {'ok' if codes == [200, 200] else codes}")
+        if codes != [200, 200]:
+            problem("the phone access web server didn't answer")
+    except Exception as e:
+        problem(f"phone access web server: {e}")
+
     out_dir = Path(tempfile.mkdtemp(prefix="moss-selftest-"))
     t0 = time.time()
     code, out = run([sys.executable, str(TOOLS / "moss_gui.py"), "--selftest", str(out_dir)], timeout=1800)

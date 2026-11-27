@@ -39,7 +39,14 @@ MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/
 - **Advanced settings** per model: steps, guidance, sampler, a negative prompt, kept line breaks (to control text layout), and **style LoRAs**.
 - **Layout boxes (MOSS).** Draw boxes to place things and text exactly where you want them, using MOSS-Image's own layout format.
 - **Low-memory warning** before a big job if Windows is short on memory, instead of failing partway.
-- **Phone access.** Make pictures from your phone's browser over your home network or WireGuard. It's password-protected and off until you turn it on.
+- **Phone access (new in 1.9: a full phone app).** Use the studio from an iPhone, Android phone or tablet on your home network or over WireGuard, with everything still running on the PC's graphics card:
+  - make pictures with any model, shape, size, seed, count and advanced setting, or compare models;
+  - edit a photo from the phone or a picture from the gallery, by instruction or by painting the area to change with your finger;
+  - improve a prompt, or write one from a photo;
+  - watch live progress, cancel, and manage the queue;
+  - browse and search the gallery, then download, reuse, make variations, upscale, fix words, set the PC's wallpaper or delete (to the Recycle Bin).
+
+  It's password-protected and off until you turn it on. Add it to the home screen for an app icon.
 - **Write a prompt from any picture.** Pick a photo or an AI picture and the app writes a detailed prompt that recreates it, in a form all four models understand. Any readable text is copied in quotes.
   - It runs locally by default (free, private) with [llama.cpp](https://github.com/ggml-org/llama.cpp) and the Qwen vision files you already have; about 5-10 seconds.
   - Or use Google Gemini 3.5 Flash-Lite with your API key, about $0.001 per picture.
@@ -228,7 +235,29 @@ Keep the same picture size when you make it.
 
 Put LoRA `.safetensors` files in `models\loras\styles`, and only use a LoRA with the model it was made for.
 
-**To use it from your phone**, open **More ▾ > Phone access**, set a password and turn it on. Open the address it shows in your phone's browser, on the same network or over your WireGuard tunnel. The app must be running on your PC. If Windows asks whether to allow network access, allow it for private networks.
+**To use it from your phone or tablet:**
+
+1. Open **More ▾ > Phone access**, set a password (8 characters or more), choose *Phones on my network or WireGuard can connect*, tick **Turn on phone access** and click **Save**.
+2. Open the address it shows (like `http://192.168.1.20:8780/`) in the phone's browser, on the same Wi-Fi or over your WireGuard tunnel, and sign in. If Windows asks whether to allow network access, allow it for private networks.
+3. For an app icon: on an iPhone, tap **Share > Add to Home Screen** in Safari; on Android, choose **Add to Home screen** (or **Install app**) in Chrome's menu.
+
+The phone app has four tabs:
+
+- **Create**: the same choices as the window. That's new or edit, model, shape (including your screens), size, how many, seed, the word check, **Advanced** (steps, guidance, sampler, negative prompt) and **Compare models**.
+  - To edit, choose **Photo from phone** (photos are shrunk to the largest size the models make) or **From the gallery**. Then type an instruction, or tap **Paint area** and paint over the part to change with your finger.
+  - **Improve** and **From a picture** run the prompt tools on the PC (or on Gemini, if you've added a key).
+- **Queue**: what's waiting (remove items, run or stop the queue), prompt tools and copies in progress, and every picture finished since the app started. A bar at the top shows the current picture's progress and time left on every tab, with **Cancel**.
+- **Gallery**: everything in the output folder, newest first, with search. Tap a picture to see it with its prompt and settings. From there you can **Download**, **Use prompt**, make **4 variations**, **Edit this**, make a **Bigger copy** (2x or 4x), **Fix words**, get a **Prompt from it**, **Set as wallpaper** on the PC, or **Delete** (to the PC's Recycle Bin).
+- **More**: the PC's name, screens and models, **Put the computer's previous wallpaper back**, and **Sign out**.
+
+The phone stays signed in for 30 days. **Sign out all phones** in the Phone access window signs every phone out, and so does changing the password.
+
+Phones use the PC only while MOSS Image Studio is open there; minimizing it is fine.
+- **Start minimized when I sign in to Windows** (in the Phone access window) keeps it available whenever the PC is on.
+- Closing the window while phone access is on asks whether to minimize instead.
+- The PC is kept awake while a picture is being made. The rest of the time, Windows' sleep settings decide whether phones can reach it.
+
+Pictures from a phone go through the same queue as the window's, with the same models, settings and file details. Nano Banana asks on the phone before each paid request. Photos sent from a phone are kept in `outputs\uploads`.
 
 **To check for updates**, click **More ▾ > Check for updates...**. The first check reads every model file once (about half a minute); later checks take a second. Tick what to install, then click **Install selected**. Updating the app itself uses the GitHub CLI (`gh`), signed in, because the project is private; the new `.exe` replaces the old one and the app offers to restart.
 
@@ -289,11 +318,14 @@ It makes one small picture through the app and writes `selftest-result.json`.
 - **"Write prompt" says the local describer isn't available.** Choose its *get the local describer* option to download llama.cpp. You also need the MOSS editing add-on or Qwen Image 2.1 from `download-models.ps1`, since those include the vision files it uses.
 - **My wallpaper changed and I want the old one back.** Choose **More ▾ > Put my previous wallpaper back**, or the same item under **Set as wallpaper ▾**.
 - **The phone can't reach the app.** Check these:
+  - MOSS Image Studio is open on the PC (minimized is fine), and the PC isn't asleep;
   - phone access is on, set to *my network or WireGuard*;
   - the phone is on the same network or connected through WireGuard;
   - Windows Firewall allows the app on private networks.
 
   The page uses plain HTTP, so only use it on networks you trust or through the tunnel.
+- **A photo from an iPhone won't open.** The phone app converts photos itself, so this is rare. If it happens, set **Settings > Camera > Formats** to *Most Compatible*, or send a screenshot of the photo.
+- **The phone says the computer is busy.** A picture, upscale or word fix is using the graphics card. Pictures you ask for meanwhile wait in the queue and start by themselves. Prompt tools can use the Gemini cloud option instead.
 - **The words come out misspelled.** If the text check still can't get them right in 3 tries and 2 redraws of the wrong words, it keeps the closest one and tells you what it read. **Fix words...** can try again. Try Qwen Image, shorten the quoted text, or make it at Standard size. The check needs the Qwen3-VL files that come with Qwen Image; without them it uses Qwen 3.5, which is less exact.
 - **An edit keeps retrying because the words changed on purpose.** Put the new words in "quotes" in the instruction, or untick **Check the words come out right** for that edit.
 - **The app update says it needs the GitHub CLI.** Install it from cli.github.com and run `gh auth login` once.
@@ -316,7 +348,9 @@ It makes one small picture through the app and writes `selftest-result.json`.
 | `moss-image-pc/tools/moss_wallpaper_mac.py` | The same for macOS desktop pictures (AppKit) |
 | `moss-image-pc/tools/moss_platform.py` | What differs between Windows and macOS: screens, memory, keys, files, schedules |
 | `moss-image-pc/tools/mac_setup.py`, `download_models.py` | Mac engines, app and self-check; model downloads |
-| `moss-image-pc/tools/moss_remote.py` | The password-protected phone web page |
+| `moss-image-pc/tools/moss_remote.py` | The phone web server: sign-in, sessions, files and the JSON API's routes |
+| `moss-image-pc/tools/moss_phone.py` | Everything the phone app can see and do, run against the open window |
+| `moss-image-pc/tools/web/` | The phone app itself (HTML, CSS, JavaScript and home-screen icons) |
 | `moss-image-pc/tools/moss_cloud.py` | Nano Banana: Google Gemini API requests and the encrypted API key |
 | `moss-image-pc/tools/moss_meta.py` | Reads and writes picture details (EXIF / XMP / PNG text) |
 | `moss-image-pc/tools/prompt_info.py` | Token counter and prompt `.txt` writer used by the launcher |

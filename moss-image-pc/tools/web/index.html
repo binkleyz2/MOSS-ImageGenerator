@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MOSS Studio">
+<meta name="theme-color" content="#16181c">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" href="/icon-192.png">
+<link rel="stylesheet" href="/style.css">
+<title>MOSS Image Studio</title>
+</head>
+<body data-csrf="{{csrf}}">
+
+<header class="top">
+  <div class="brand"><img src="/icon-192.png" alt=""><span>MOSS Image Studio</span></div>
+  <button class="chip" id="pc-chip" type="button">Connecting...</button>
+</header>
+
+<section id="now" class="now" hidden>
+  <div class="now-row">
+    <div class="now-text">
+      <div class="now-title" id="now-title"></div>
+      <div class="now-status" id="now-status"></div>
+    </div>
+    <button class="ghost danger small" id="now-cancel" type="button">Cancel</button>
+  </div>
+  <div class="bar"><div id="now-bar"></div></div>
+</section>
+
+<main>
+<!-- ================= Create ================= -->
+<section class="tab" id="tab-create">
+  <div class="seg" role="tablist">
+    <button type="button" data-mode="new" class="on">New picture</button>
+    <button type="button" data-mode="edit">Edit a picture</button>
+  </div>
+
+  <div class="card" id="edit-card" hidden>
+    <div class="src-row">
+      <div class="src-thumb" id="src-thumb"><span>No picture chosen</span></div>
+      <div class="src-actions">
+        <label class="btn" for="src-file">Photo from phone</label>
+        <input type="file" id="src-file" accept="image/*" hidden>
+        <button type="button" class="btn" id="src-gallery">From the gallery</button>
+        <button type="button" class="btn" id="src-paint" disabled>Paint area</button>
+      </div>
+    </div>
+    <p class="hint" id="src-note">Choose the picture to change. With an instruction ("make it night"), the whole
+      picture is redrawn; paint an area to change only that part and keep the rest exactly.</p>
+  </div>
+
+  <label class="field">
+    <span id="prompt-label">What do you want to see?</span>
+    <textarea id="prompt" rows="5" placeholder="A cozy cabin in a snowy forest at dusk, warm light in the windows"></textarea>
+  </label>
+  <div class="under-prompt">
+    <span class="hint" id="tokens"></span>
+    <span class="spacer"></span>
+    <button type="button" class="link" id="btn-enhance">Improve</button>
+    <button type="button" class="link" id="btn-describe">From a picture</button>
+    <button type="button" class="link" id="btn-clear">Clear</button>
+  </div>
+
+  <label class="field"><span>Model</span><select id="model"></select></label>
+  <p class="hint" id="model-note"></p>
+
+  <div id="size-new">
+    <div class="two">
+      <label class="field"><span>Shape</span><select id="shape"></select></label>
+      <label class="field" id="tier-wrap"><span>Size</span><select id="tier"></select></label>
+    </div>
+    <div class="two" id="custom-size" hidden>
+      <label class="field"><span>Width</span><input type="number" id="cw" inputmode="numeric" min="256" max="3440" step="16" value="1024"></label>
+      <label class="field"><span>Height</span><input type="number" id="ch" inputmode="numeric" min="256" max="3440" step="16" value="1024"></label>
+    </div>
+    <div id="screen-opts" hidden>
+      <label class="check"><input type="checkbox" id="screen-upscale" checked> Scale up to the screens' full size</label>
+      <label class="check"><input type="checkbox" id="screen-split" checked> Also save a picture for each screen</label>
+    </div>
+  </div>
+  <p class="size-line" id="size-line"></p>
+  <p class="warn" id="size-warn" hidden></p>
+
+  <div class="two">
+    <label class="field"><span>How many</span>
+      <select id="count"><option>1</option><option>2</option><option>3</option><option>4</option><option>6</option><option>8</option></select>
+    </label>
+    <label class="field"><span>Seed</span>
+      <input type="text" id="seed" inputmode="numeric" placeholder="Random" autocomplete="off">
+    </label>
+  </div>
+  <label class="check" id="text-check-wrap"><input type="checkbox" id="text-check" checked> Check the words come out right (words in "quotes", or the words already in a picture you edit)</label>
+
+  <details class="more" id="adv">
+    <summary>Advanced</summary>
+    <div class="two">
+      <label class="field"><span>Steps</span><input type="number" id="adv-steps" inputmode="numeric" min="1" max="150"></label>
+      <label class="field"><span>Guidance (cfg)</span><input type="number" id="adv-cfg" inputmode="decimal" min="0" max="30" step="0.1"></label>
+    </div>
+    <label class="field"><span>Sampler</span><select id="adv-sampler"></select></label>
+    <label class="field"><span>Leave out (negative prompt)</span><textarea id="adv-negative" rows="2"></textarea></label>
+    <button type="button" class="link" id="adv-reset">Use this model's settings from the computer</button>
+  </details>
+
+  <details class="more" id="compare">
+    <summary>Compare models</summary>
+    <p class="hint">Tick two or more to make the same prompt with each, side by side.</p>
+    <div id="compare-list"></div>
+  </details>
+
+  <div class="go-wrap">
+    <button type="button" class="primary wide big" id="go">Make picture</button>
+  </div>
+</section>
+
+<!-- ================= Queue ================= -->
+<section class="tab" id="tab-queue" hidden>
+  <h2>Waiting</h2>
+  <div id="waiting" class="list"></div>
+  <div class="row-btns">
+    <button type="button" class="btn" id="q-run">Run the queue</button>
+    <button type="button" class="btn" id="q-stop">Stop after this one</button>
+    <button type="button" class="btn danger" id="q-clear">Remove all waiting</button>
+  </div>
+  <h2>Tools</h2>
+  <div id="tasks" class="list"></div>
+  <h2>Finished</h2>
+  <div id="finished" class="finished"></div>
+</section>
+
+<!-- ================= Gallery ================= -->
+<section class="tab" id="tab-gallery" hidden>
+  <div class="pick-banner" id="pick-banner" hidden>
+    <span>Tap the picture to use</span><button type="button" class="link" id="pick-cancel">Cancel</button>
+  </div>
+  <input type="search" id="g-search" placeholder="Search prompts and models" autocomplete="off">
+  <p class="hint" id="g-count"></p>
+  <div class="grid" id="grid"></div>
+  <button type="button" class="btn wide" id="g-more" hidden>Show more</button>
+</section>
+
+<!-- ================= More ================= -->
+<section class="tab" id="tab-more" hidden>
+  <div class="card">
+    <h2>The computer</h2>
+    <dl class="facts" id="pc-facts"></dl>
+  </div>
+  <div class="card">
+    <h2>Models</h2>
+    <ul class="models" id="model-list"></ul>
+  </div>
+  <div class="card">
+    <h2>Wallpaper</h2>
+    <p class="hint">Set any picture as the computer's wallpaper from its page in the Gallery.</p>
+    <button type="button" class="btn" id="wp-restore">Put the computer's previous wallpaper back</button>
+  </div>
+  <div class="card">
+    <h2>On this phone</h2>
+    <p class="hint" id="install-tip"></p>
+    <form method="post" action="/logout"><button class="btn danger">Sign out</button></form>
+  </div>
+</section>
+</main>
+
+<nav class="tabs">
+  <button type="button" data-tab="create" class="on"><span class="ico ico-create"></span>Create</button>
+  <button type="button" data-tab="queue"><span class="ico ico-queue"></span>Queue<b class="badge" id="badge" hidden></b></button>
+  <button type="button" data-tab="gallery"><span class="ico ico-gallery"></span>Gallery</button>
+  <button type="button" data-tab="more"><span class="ico ico-more"></span>More</button>
+</nav>
+
+<!-- ================= Picture viewer ================= -->
+<div class="overlay" id="viewer" hidden>
+  <div class="v-top">
+    <button type="button" class="icon-btn" id="v-close" aria-label="Close">&#x2715;</button>
+    <span class="v-pos" id="v-pos"></span>
+    <button type="button" class="icon-btn" id="v-prev" aria-label="Previous">&#x2039;</button>
+    <button type="button" class="icon-btn" id="v-next" aria-label="Next">&#x203a;</button>
+  </div>
+  <div class="v-scroll" id="v-scroll">
+    <div class="v-img-wrap" id="v-img-wrap"><img id="v-img" alt=""></div>
+    <div class="v-body">
+      <div class="v-actions">
+        <a class="btn" id="v-download">Download</a>
+        <button type="button" class="btn" id="v-reuse">Use prompt</button>
+        <button type="button" class="btn" id="v-variations">4 variations</button>
+        <button type="button" class="btn" id="v-edit">Edit this</button>
+        <button type="button" class="btn" id="v-upscale">Bigger copy</button>
+        <button type="button" class="btn" id="v-fix">Fix words</button>
+        <button type="button" class="btn" id="v-describe">Prompt from it</button>
+        <button type="button" class="btn" id="v-wallpaper">Set as wallpaper</button>
+        <button type="button" class="btn danger" id="v-delete">Delete</button>
+      </div>
+      <h3>Prompt</h3>
+      <p class="v-prompt" id="v-prompt"></p>
+      <dl class="facts" id="v-facts"></dl>
+    </div>
+  </div>
+</div>
+
+<!-- ================= Painter ================= -->
+<div class="overlay painter" id="painter" hidden>
+  <div class="v-top">
+    <button type="button" class="link" id="p-cancel">Cancel</button>
+    <span class="v-pos">Paint over what to change</span>
+    <button type="button" class="link strong" id="p-done">Done</button>
+  </div>
+  <div class="p-stage" id="p-stage"><canvas id="p-canvas"></canvas></div>
+  <div class="p-tools">
+    <div class="seg small">
+      <button type="button" data-tool="paint" class="on">Paint</button>
+      <button type="button" data-tool="erase">Erase</button>
+    </div>
+    <label class="p-size">Brush <input type="range" id="p-brush" min="1" max="20" value="6"></label>
+    <button type="button" class="btn" id="p-undo">Undo</button>
+    <button type="button" class="btn" id="p-clear">Clear</button>
+  </div>
+</div>
+
+<!-- ================= Sheets (enhance, describe, fix words, wallpaper, upscale) ================= -->
+<div class="sheet-back" id="sheet-back" hidden></div>
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet-head"><h2 id="sheet-title"></h2><button type="button" class="icon-btn" id="sheet-close" aria-label="Close">&#x2715;</button></div>
+  <div id="sheet-body"></div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

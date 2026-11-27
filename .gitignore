@@ -15,6 +15,7 @@ packaging/.venv-build/
 # Your pictures and per-PC settings
 moss-image-pc/outputs/
 moss-image-pc/tools/gui_settings.json
+moss-image-pc/tools/phone_sessions.json
 
 # Logs, backups and temporary files
 moss-image-install-log.txt
