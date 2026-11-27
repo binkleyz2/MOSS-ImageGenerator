@@ -4,7 +4,7 @@
 
 **Make AI pictures on your own Windows PC: no cloud service, no account, no per-image cost.**
 
-MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) text-to-image model from OpenMOSS. It can also use **FLUX.2 Klein** and **Qwen Image 2.1**, and it can **edit existing pictures** by instruction. Everything runs locally on an NVIDIA graphics card, except for the optional **Nano Banana** cloud model, which runs through [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp). Nano Banana runs on Google's servers with your own API key. Type what you want to see, pick a size, and the picture is made on your machine.
+MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) text-to-image model from OpenMOSS. It can also use **FLUX.2 Klein**, **FLUX.3 Image Klein**, **Z-Image Turbo** and **Qwen Image 2.1**, and it can **edit existing pictures** by instruction. Everything runs locally on an NVIDIA graphics card, except for the optional **Nano Banana** cloud model, which runs through [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp). Nano Banana runs on Google's servers with your own API key. Type what you want to see, pick a size, and the picture is made on your machine.
 
 ![MOSS Image Studio in dark mode](docs/images/studio-dark.png)
 
@@ -16,9 +16,12 @@ MOSS Image Studio is a desktop app for the open [MOSS-Image](https://github.com/
   | --- | --- | --- | --- | --- |
   | **MOSS-Image SFT** (installed by default) | Detailed scenes, readable text | about 40 s | Yes | Apache-2.0 |
   | **FLUX.2 Klein 4B** (optional, 8.6 GB) | Photos and general pictures, very fast | about 10 s | Yes | Apache-2.0 |
+  | **FLUX.3 Image Klein** (optional, 10.4 GB) | More detail, better edits, good text; best with full descriptions | about 14 s (5 MP in about 75 s) | Yes | FLUX Kommunity (non-commercial; small businesses under $5M revenue OK) |
+  | **Z-Image Turbo** (optional, 6.9 GB with FLUX, 11 GB without) | Realistic photos, good English text, very fast | about 14 s (5 MP in about a minute) | Painted areas only\*\* | Apache-2.0 |
   | **Qwen Image 2.1** (optional, 14 GB) | Text in pictures, complex layouts | about 40 s | Yes\* | Qwen Research (non-commercial) |
-
   | **Nano Banana 2.1** (optional, Google cloud) | Following detailed instructions, editing | usually 10-40 s | Yes | Google Gemini API terms; about $0.03-0.11 per picture |
+
+  \*\*Z-Image Turbo can change a painted area (**Paint area...**) but can't follow edit instructions; its editing version isn't released yet.
 
   \*Qwen edits normal pictures well, in about 50 s at 1 MP. Very dark pictures can come out over-brightened, so use MOSS or FLUX for those.
 - **Edit a picture by instruction.** Choose **Edit a picture**, pick any PNG or JPEG, and describe the change, e.g. *"Change only the orange cat to a black cat. Keep everything else unchanged."* The rest of the picture stays as it was.
@@ -110,6 +113,8 @@ Same seed, one word changed (*orange cat* to *black cat*):
 4. **Optional: add more models.** Run `download-models.ps1` and pick any of:
    - the editing add-on for MOSS (1.4 GB);
    - FLUX.2 Klein (8.6 GB);
+   - FLUX.3 Image Klein (10.4 GB);
+   - Z-Image Turbo (6.9 GB; it shares one file with FLUX.2 Klein, so 11 GB if you don't have FLUX);
    - Qwen Image 2.1 (14 GB);
    - the AI upscaler, Real-ESRGAN (67 MB).
 
@@ -156,7 +161,7 @@ The first time, the local describer offers to download llama.cpp (about 360 MB) 
 **To change only part of a picture**, choose **Edit a picture**, then **Paint area...**. Paint over the part to change (right-click erases), click **Use this area**, describe what should be there, and click **Edit picture**. Everything outside the painted area stays exactly as it was.
 
 **To get text spelled right**, put the exact words in "quotes" and leave **Check the words come out right** ticked under the prompt. The app retries up to 3 times, then redraws just the wrong words. When editing, put any *new* words in quotes; otherwise the app expects the original's words to stay. These things help most:
-- **Qwen Image** or **Nano Banana**: they're much better at text than FLUX.2 Klein or MOSS;
+- **Qwen Image**, **FLUX.3 Image Klein** or **Nano Banana**: they're much better at text than FLUX.2 Klein or MOSS (Z-Image Turbo is in between, and very fast);
 - short quoted text;
 - the **Standard** size, then **Scale up** for screens.
 
@@ -255,7 +260,7 @@ It makes one small picture through the app and writes `selftest-result.json`.
 | Path | What it is |
 | --- | --- |
 | `installer-moss-image.ps1` | Downloads and sets up the engine and MOSS-Image, and makes a test picture |
-| `download-models.ps1` | Downloads the optional models: MOSS editing add-on, FLUX.2 Klein, Qwen Image 2.1 |
+| `download-models.ps1` | Downloads the optional models: MOSS editing add-on, FLUX.2 Klein, FLUX.3 Image Klein, Z-Image Turbo, Qwen Image 2.1, AI upscaler |
 | `moss-image-pc/tools/moss_gui.py` | MOSS Image Studio |
 | `moss-image-pc/tools/moss_describe.py` | Write a prompt from a picture: local (llama.cpp + Qwen vision) or Gemini |
 | `moss-image-pc/tools/moss_updates.py` | Checks and installs model and engine updates, verified, with undo |
@@ -299,6 +304,12 @@ The optional models belong to their makers:
 - **[FLUX.2 Klein 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)** by Black Forest Labs (Apache-2.0).
   - GGUF build by [leejet](https://huggingface.co/leejet/FLUX.2-klein-4B-GGUF).
   - Text encoder: [Qwen3-4B](https://huggingface.co/unsloth/Qwen3-4B-GGUF).
+- **[FLUX.3 Image Klein](https://huggingface.co/black-forest-labs/flux-3-image-klein)** by Black Forest Labs (FLUX Kommunity License: non-commercial use, plus commercial use of outputs by businesses under US$5M annual revenue).
+  - GGUF build by [leejet](https://huggingface.co/leejet/flux-3-image-klein-GGUF).
+  - Text encoder: [Qwen3-VL-4B](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF). It uses the FLUX.2 VAE the installer downloads.
+- **[Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)** by Tongyi-MAI, Alibaba (Apache-2.0).
+  - GGUF build by [leejet](https://huggingface.co/leejet/Z-Image-Turbo-GGUF); VAE from [Comfy-Org/Z-Image-Turbo](https://huggingface.co/Comfy-Org/Z-Image-Turbo).
+  - Text encoder: [Qwen3-4B](https://huggingface.co/unsloth/Qwen3-4B-GGUF), the same file FLUX.2 Klein uses.
 - **[Qwen Image 2.1](https://huggingface.co/Qwen/Qwen-Image-2.1)** by the Qwen team (Qwen Research license: non-commercial use).
   - Files from [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1).
   - Text encoder: [Qwen3-VL-8B](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF).

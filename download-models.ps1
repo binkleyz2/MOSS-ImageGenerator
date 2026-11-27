@@ -2,7 +2,7 @@
 # Downloads the optional models for MOSS Image Studio into moss-image-pc\models (next to this script).
 # Run installer-moss-image.ps1 first: it installs the engine and the main MOSS-Image model.
 #   powershell -ExecutionPolicy Bypass -File .\download-models.ps1            (asks which ones)
-#   powershell -ExecutionPolicy Bypass -File .\download-models.ps1 flux qwen  (no questions)
+#   powershell -ExecutionPolicy Bypass -File .\download-models.ps1 flux qwen zimage  (no questions)
 # Safe to re-run: finished files are skipped and interrupted ones resume.
 
 param([string[]]$Packs)
@@ -22,6 +22,19 @@ $catalog = [ordered]@{
         Files = @(
             @('flux2-klein-4b\flux-2-klein-4b-Q8_0.gguf', "$HF/leejet/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q8_0.gguf"),
             @('flux2-klein-4b\Qwen3-4B-Q8_0.gguf',        "$HF/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q8_0.gguf"))
+    }
+    'flux3' = @{
+        Name = 'FLUX.3 Image Klein (newer FLUX: better pictures and edits, 16 steps)'; Size = '10.4 GB'; License = 'FLUX Kommunity (non-commercial; small businesses OK)'
+        Files = @(
+            @('flux3-klein\flux3-image-klein-Q8_0.gguf',    "$HF/leejet/flux-3-image-klein-GGUF/resolve/main/flux3-image-klein-Q8_0.gguf"),
+            @('flux3-klein\Qwen3VL-4B-Instruct-Q8_0.gguf', "$HF/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q8_0.gguf"))
+    }
+    'zimage' = @{
+        Name = 'Z-Image Turbo (fast photos, good text; shares the Qwen3-4B file with FLUX)'; Size = '6.9 GB, +4.3 GB without FLUX'; License = 'Apache-2.0'
+        Files = @(
+            @('z-image-turbo\z_image_turbo-Q8_0.gguf', "$HF/leejet/Z-Image-Turbo-GGUF/resolve/main/z_image_turbo-Q8_0.gguf"),
+            @('z-image-turbo\ae.safetensors',          "$HF/Comfy-Org/Z-Image-Turbo/resolve/main/split_files/vae/ae.safetensors"),
+            @('flux2-klein-4b\Qwen3-4B-Q8_0.gguf',     "$HF/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q8_0.gguf"))
     }
     'upscaler' = @{
         Name = 'AI upscaler (Real-ESRGAN x4plus, for sharper big pictures)'; Size = '67 MB'; License = 'BSD-3-Clause'

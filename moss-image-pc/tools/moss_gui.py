@@ -31,7 +31,7 @@ import moss_meta as M
 import moss_updates as U
 import moss_extras as X
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))   # bundled icon
 
@@ -84,6 +84,24 @@ PROFILES = {
         steps=4, cfg=1.0, sampler="euler", align=16, step_secs=0.5, exact_tokens=False,
         note="Very fast: 4 steps. Photos and general pictures.",
         edit=dict(files={}, need=[], prompt_suffix="", steps=4, cfg=1.0, extra_secs=2)),
+    "flux3-klein": dict(
+        name="FLUX.3 Image Klein", prefix="flux3klein", license="FLUX Kommunity (non-commercial; small businesses OK)",
+        files={"--diffusion-model": "flux3-klein/flux3-image-klein-Q8_0.gguf",
+               "--llm": "flux3-klein/Qwen3VL-4B-Instruct-Q8_0.gguf", "--vae": "flux2-vae.safetensors"},
+        steps=16, cfg=1.0, sampler="euler", align=16, step_secs=0.25, size_power=1.8, exact_tokens=False,
+        note="Newer FLUX: more detail and better edits, 16 steps. Works best with full descriptions "
+             "(Enhance helps).",
+        edit=dict(files={}, need=[], prompt_suffix="", steps=16, cfg=1.0, extra_secs=5)),
+    "z-image-turbo": dict(
+        name="Z-Image Turbo", prefix="zimage", license="Apache-2.0",
+        files={"--diffusion-model": "z-image-turbo/z_image_turbo-Q8_0.gguf",
+               "--llm": "flux2-klein-4b/Qwen3-4B-Q8_0.gguf", "--vae": "z-image-turbo/ae.safetensors"},
+        steps=8, cfg=1.0, sampler="euler", align=16, step_secs=0.45, size_power=1.7, exact_tokens=False,
+        note="Fast (8 steps), realistic photos and good English text. Changes painted areas, "
+             "but can't follow edit instructions.",
+        no_edit="Z-Image Turbo can't follow edit instructions (its editing version isn't out yet). It can still "
+                "change part of a picture: click Paint area... and paint over it.",
+        edit=None),
     "qwen-image-2.1": dict(
         name="Qwen Image 2.1", prefix="qwenimage", license="Qwen Research (non-commercial)",
         files={"--diffusion-model": "qwen-image-2.1/qwen_image_2.1_int8_convrot.safetensors",
@@ -521,7 +539,7 @@ def check_text(job, picture, say):
 
 REDRAW_STRENGTH = 0.8            # word fixer: how much of the old lettering to redraw (lower keeps size and style)
 TEXT_FIXES = 2                    # word fixer: passes over the best picture after the tries run out
-FIXERS = ["qwen-image-2.1", "flux2-klein-4b", "moss"]     # best at text first
+FIXERS = ["qwen-image-2.1", "flux3-klein", "z-image-turbo", "flux2-klein-4b", "moss"]     # best at text first
 
 
 def fixer_profile():
@@ -1251,9 +1269,8 @@ class Studio:
             return
         self.model_key = list(PROFILES)[chosen]
         self.refresh_model_list()
-        if self.mode.get() == "edit" and not self.can_edit():
-            self.mode.set("new")
-            self.on_mode_change()
+        if self.mode.get() == "edit" and self.profile.get("cloud") is None and not self.profile["edit"]                 and not self.edit_mask:
+            self.status.configure(text=f"{self.profile['name']} changes painted areas only: use Paint area...")
         if self.mode.get() == "edit" and self.edit_src:
             self.set_edit_src(self.edit_src)
         else:
@@ -1268,14 +1285,17 @@ class Studio:
             return True
         if warn:
             others = ", ".join(p["name"] for p in PROFILES.values() if p["edit"])
-            messagebox.showinfo("Edit a picture", f"{self.profile['name']} can't edit pictures in this app yet: "
-                                f"on this setup it runs out of memory. Use {others} for editing.")
+            reason = self.profile.get("no_edit") or (f"{self.profile['name']} can't edit pictures in this app yet: "
+                                                     "on this setup it runs out of memory.")
+            messagebox.showinfo("Edit a picture", f"{reason} Use {others} to edit with an instruction.")
         return False
 
     def on_mode_change(self):
-        if self.mode.get() == "edit" and not self.can_edit():
-            self.mode.set("new")
+        # Every model can change a painted area; models without instruction editing are stopped only when
+        # there's nothing painted (see collect_spec).
         editing = self.mode.get() == "edit"
+        if editing and not self.profile.get("cloud") and not self.profile["edit"] and not self.edit_mask:
+            self.status.configure(text=f"{self.profile['name']} changes painted areas only: use Paint area...")
         self.prompt_box.configure(text=(" What goes in the painted area? " if self.edit_mask else
                                         " What should change? ") if editing else " What do you want to see? ")
         self.go_btn.configure(text="Edit picture" if editing else "Make picture")
